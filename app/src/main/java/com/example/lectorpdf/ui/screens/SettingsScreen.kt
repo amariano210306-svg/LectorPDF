@@ -66,7 +66,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
                     Icon(Icons.Outlined.Contrast, null, tint = MaterialTheme.colorScheme.primary)
                     Column {
                         Text("Preferencias del lector", style = MaterialTheme.typography.titleMedium)
-                        Text("Los controles de PDF y EPUB se habilitarán al instalar sus motores en las siguientes fases.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("El lector PDF ya está disponible. Las preferencias de EPUB se habilitarán junto con su lector.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
