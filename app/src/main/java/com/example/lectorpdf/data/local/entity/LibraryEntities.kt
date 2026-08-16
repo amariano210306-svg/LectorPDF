@@ -66,6 +66,11 @@ data class BookProgressEntity(
     @ColumnInfo(defaultValue = "0") val cropMargins: Boolean = false,
     @ColumnInfo(defaultValue = "'AUTO'") val orientation: String = "AUTO",
     @ColumnInfo(defaultValue = "0") val rotation: Int = 0,
+    @ColumnInfo(defaultValue = "'DAY'") val pdfTheme: String = "DAY",
+    @ColumnInfo(defaultValue = "0") val cropLeft: Float = 0f,
+    @ColumnInfo(defaultValue = "0") val cropTop: Float = 0f,
+    @ColumnInfo(defaultValue = "0") val cropRight: Float = 0f,
+    @ColumnInfo(defaultValue = "0") val cropBottom: Float = 0f,
 )
 
 @Entity(tableName = "collections", indices = [Index(value = ["name"], unique = true)])

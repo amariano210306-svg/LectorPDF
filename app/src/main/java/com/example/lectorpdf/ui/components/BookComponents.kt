@@ -1,6 +1,7 @@
 package com.example.lectorpdf.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -23,61 +25,46 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.lectorpdf.domain.model.BookFormat
 import com.example.lectorpdf.domain.model.LibraryBook
+import com.example.lectorpdf.data.cover.PdfCoverCache
 import java.text.DateFormat
 import java.util.Date
 import kotlin.math.ln
 import kotlin.math.pow
 
-private val CoverPalettes = listOf(
-    Color(0xFF164E63) to Color(0xFFCFFAFE),
-    Color(0xFF365314) to Color(0xFFECFCCB),
-    Color(0xFF713F12) to Color(0xFFFEF3C7),
-    Color(0xFF581C87) to Color(0xFFF3E8FF),
-    Color(0xFF7F1D1D) to Color(0xFFFEE2E2),
-)
-
 @Composable
 fun BookCover(book: LibraryBook, modifier: Modifier = Modifier) {
-    val palette = CoverPalettes[(book.id.hashCode() and Int.MAX_VALUE) % CoverPalettes.size]
+    val context = LocalContext.current
+    val coverCache = remember(context) { PdfCoverCache(context) }
+    val pdfCover by produceState<android.graphics.Bitmap?>(initialValue = null, book.uri, book.lastModified, book.sizeBytes) {
+        value = if (book.format == BookFormat.PDF) runCatching { coverCache.loadOrCreate(book) }.getOrNull() else null
+    }
     Box(
         modifier = modifier
             .aspectRatio(0.68f)
             .clip(RoundedCornerShape(14.dp))
-            .background(palette.first)
-            .padding(14.dp),
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
-        Text(
-            text = book.format.name,
-            color = palette.second.copy(alpha = .76f),
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.align(Alignment.TopStart),
-        )
-        Text(
-            text = book.title,
-            color = palette.second,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            maxLines = 4,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.CenterStart),
-        )
-        Text(
-            text = book.author ?: "Documento local",
-            color = palette.second.copy(alpha = .82f),
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.align(Alignment.BottomStart),
-        )
+        pdfCover?.let { bitmap ->
+            Image(bitmap.asImageBitmap(), "Portada de ${book.title}", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } ?: Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
+            Text(book.format.name, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+            Text(book.title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            Text(book.author ?: "Documento local", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
     }
 }
 

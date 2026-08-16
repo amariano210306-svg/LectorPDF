@@ -27,7 +27,9 @@ import com.example.lectorpdf.ui.viewmodel.MainViewModel
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val allowAutoResume = savedInstanceState == null
+        val skipAutoResume = intent.getBooleanExtra(EXTRA_SKIP_AUTO_RESUME, false)
+        val allowAutoResume = savedInstanceState == null &&
+            (application as LectorApplication).container.autoResumeCoordinator.tryAcquire(skipAutoResume)
         enableEdgeToEdge()
         setContent {
             val viewModel: MainViewModel = viewModel(factory = AppViewModelProvider.Factory)
@@ -43,7 +45,11 @@ class MainActivity : ComponentActivity() {
                                 if (!state.loading && state.settings.onboardingCompleted && !autoResumeAttempted) {
                                     autoResumeAttempted = true
                                     viewModel.prepareAutoResume()?.let { bookId ->
-                                        startActivity(android.content.Intent(this@MainActivity, com.example.lectorpdf.reader.pdf.PdfReaderActivity::class.java).putExtra(com.example.lectorpdf.reader.pdf.PdfReaderActivity.EXTRA_BOOK_ID, bookId))
+                                        startActivity(
+                                            android.content.Intent(this@MainActivity, com.example.lectorpdf.reader.pdf.PdfReaderActivity::class.java)
+                                                .putExtra(com.example.lectorpdf.reader.pdf.PdfReaderActivity.EXTRA_BOOK_ID, bookId)
+                                                .putExtra(com.example.lectorpdf.reader.pdf.PdfReaderActivity.EXTRA_RETURN_TO_HOME, true),
+                                        )
                                     }
                                 }
                             }
@@ -54,4 +60,6 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    companion object { const val EXTRA_SKIP_AUTO_RESUME = "skip_auto_resume" }
 }

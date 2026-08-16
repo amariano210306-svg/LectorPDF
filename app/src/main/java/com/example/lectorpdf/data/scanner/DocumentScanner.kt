@@ -8,7 +8,11 @@ import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.core.net.toUri
+import com.example.lectorpdf.data.local.dao.FolderDao
+import com.example.lectorpdf.data.local.entity.BookFolderEntity
 import com.example.lectorpdf.data.local.entity.BookEntity
+import com.example.lectorpdf.data.local.entity.LibraryFolderEntity
+import com.example.lectorpdf.data.local.entity.LibrarySourceEntity
 import com.example.lectorpdf.data.preferences.SettingsRepository
 import com.example.lectorpdf.data.repository.LibraryRepository
 import com.example.lectorpdf.domain.model.BookFormat
@@ -46,6 +50,7 @@ class DocumentScanner(
     private val context: Context,
     private val libraryRepository: LibraryRepository,
     private val settingsRepository: SettingsRepository,
+    private val folderDao: FolderDao,
 ) {
     suspend fun scanAll(onProgress: (StorageScanProgress) -> Unit = {}): StorageScanResult {
         var result = scanMediaStore(onProgress)
@@ -81,11 +86,35 @@ class DocumentScanner(
         val rootId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrElse {
             return@withContext StorageScanResult(rejected = 1, messages = listOf("La carpeta seleccionada ya no está disponible."))
         }
-        val pending = ArrayDeque<Pair<String, String>>()
-        pending.add(rootId to "")
+        val rootUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, rootId)
+        val rootName = readDocumentName(rootUri) ?: "Carpeta autorizada"
+        val sourceId = folderDao.upsertSource(
+            LibrarySourceEntity(
+                stableKey = "saf:${treeUri}",
+                type = SOURCE_SAF_TREE,
+                displayName = rootName,
+                treeUri = treeUri.toString(),
+                rootDocumentId = rootId,
+                lastScannedAt = scanId,
+            ),
+        )
+        val rootFolderId = folderDao.upsertFolder(
+            LibraryFolderEntity(
+                sourceId = sourceId,
+                documentId = rootId,
+                documentUri = rootUri.toString(),
+                displayName = rootName,
+                depth = 0,
+                relativePath = rootName,
+                lastSeenScanId = scanId,
+            ),
+        )
+        val pending = ArrayDeque<PendingFolder>()
+        val visitedFolders = FolderVisitTracker().apply { register(rootId) }
+        pending.add(PendingFolder(rootId, rootFolderId, rootName, 0))
         while (pending.isNotEmpty()) {
-            val (parentId, parentPath) = pending.removeFirst()
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parentId)
+            val parent = pending.removeFirst()
+            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, parent.documentId)
             try {
                 context.contentResolver.query(childrenUri, DOCUMENT_PROJECTION, null, null, null)?.use { cursor ->
                     while (cursor.moveToNext()) {
@@ -93,9 +122,23 @@ class DocumentScanner(
                         val documentId = cursor.string(DocumentsContract.Document.COLUMN_DOCUMENT_ID) ?: continue
                         val name = cursor.string(DocumentsContract.Document.COLUMN_DISPLAY_NAME) ?: continue
                         val mime = cursor.string(DocumentsContract.Document.COLUMN_MIME_TYPE).orEmpty()
-                        val relativePath = if (parentPath.isBlank()) name else "$parentPath/$name"
+                        val relativePath = childLogicalPath(parent.relativePath, name)
                         if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                            pending.add(documentId to relativePath)
+                            if (!visitedFolders.register(documentId)) continue
+                            val folderUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                            val folderId = folderDao.upsertFolder(
+                                LibraryFolderEntity(
+                                    sourceId = sourceId,
+                                    parentFolderId = parent.internalId,
+                                    documentId = documentId,
+                                    documentUri = folderUri.toString(),
+                                    displayName = name,
+                                    depth = parent.depth + 1,
+                                    relativePath = relativePath,
+                                    lastSeenScanId = scanId,
+                                ),
+                            )
+                            pending.add(PendingFolder(documentId, folderId, relativePath, parent.depth + 1))
                         } else {
                             val format = formatFor(name, mime) ?: continue
                             val uri = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
@@ -109,13 +152,16 @@ class DocumentScanner(
                                 lastModified = cursor.long(DocumentsContract.Document.COLUMN_LAST_MODIFIED),
                                 sourceLabel = relativePath,
                                 sourceType = SOURCE_SAF_TREE,
-                                relativePath = parentPath.ifBlank { null },
+                                relativePath = parent.relativePath,
                                 scanRootUri = treeUri.toString(),
                                 isAvailable = true,
                                 lastSeenScanId = scanId,
                             )
-                            runCatching { libraryRepository.syncBook(book) }
-                                .onSuccess { (_, inserted) -> if (inserted) imported++ else updated++ }
+                            runCatching {
+                                libraryRepository.syncBook(book).also { (bookId, _) ->
+                                    folderDao.linkBook(BookFolderEntity(bookId, parent.internalId, sourceId))
+                                }
+                            }.onSuccess { (_, inserted) -> if (inserted) imported++ else updated++ }
                                 .onFailure { rejected++; messages += "No se pudo indexar $name" }
                         }
                         if (inspected % 25 == 0) {
@@ -132,6 +178,7 @@ class DocumentScanner(
             }
         }
         val unavailable = if (complete) {
+            folderDao.markMissingFolders(sourceId, scanId)
             libraryRepository.markMissingFromScan(SOURCE_SAF_TREE, treeUri.toString(), scanId)
         } else {
             0
@@ -152,6 +199,25 @@ class DocumentScanner(
         var rejected = 0
         val messages = mutableListOf<String>()
         val collection = MediaStore.Files.getContentUri(volume)
+        val sourceId = folderDao.upsertSource(
+            LibrarySourceEntity(
+                stableKey = root,
+                type = SOURCE_MEDIA_STORE,
+                displayName = if (volume == "external_primary" || volume == "external") "Dispositivo" else "Dispositivo · $volume",
+                rootDocumentId = root,
+                lastScannedAt = scanId,
+            ),
+        )
+        val rootFolderId = folderDao.upsertFolder(
+            LibraryFolderEntity(
+                sourceId = sourceId,
+                documentId = root,
+                displayName = "Documentos detectados",
+                depth = 0,
+                relativePath = "Documentos detectados",
+                lastSeenScanId = scanId,
+            ),
+        )
         val projection = buildList {
             add(MediaStore.MediaColumns._ID)
             add(MediaStore.MediaColumns.DISPLAY_NAME)
@@ -197,7 +263,11 @@ class DocumentScanner(
                         isAvailable = true,
                         lastSeenScanId = scanId,
                     )
-                    runCatching { libraryRepository.syncBook(book) }
+                    runCatching {
+                        libraryRepository.syncBook(book).also { (bookId, _) ->
+                            folderDao.linkBook(BookFolderEntity(bookId, rootFolderId, sourceId))
+                        }
+                    }
                         .onSuccess { (_, inserted) -> if (inserted) imported++ else updated++ }
                         .onFailure { rejected++; messages += "No se pudo indexar $name" }
                     if (inspected % 25 == 0) {
@@ -214,6 +284,7 @@ class DocumentScanner(
             return StorageScanResult(rejected = 1, messages = listOf(error.message ?: "No se pudo consultar MediaStore."))
         }
         val unavailable = libraryRepository.markMissingFromScan(SOURCE_MEDIA_STORE, root, scanId)
+        folderDao.markMissingFolders(sourceId, scanId)
         onProgress(StorageScanProgress(inspected, imported + updated, "Almacenamiento del dispositivo"))
         return StorageScanResult(inspected, imported, updated, unavailable, rejected, messages.take(8))
     }
@@ -227,6 +298,15 @@ class DocumentScanner(
         val index = getColumnIndex(column)
         return if (index >= 0 && !isNull(index)) getLong(index) else null
     }
+
+    private fun readDocumentName(uri: Uri): String? =
+        context.contentResolver.query(
+            uri,
+            arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor -> if (cursor.moveToFirst()) cursor.string(DocumentsContract.Document.COLUMN_DISPLAY_NAME) else null }
 
     private fun formatFor(name: String, mime: String): BookFormat? {
         val extension = name.substringAfterLast('.', "").lowercase(Locale.ROOT)
@@ -257,4 +337,11 @@ class DocumentScanner(
             DocumentsContract.Document.COLUMN_LAST_MODIFIED,
         )
     }
+
+    private data class PendingFolder(
+        val documentId: String,
+        val internalId: Long,
+        val relativePath: String,
+        val depth: Int,
+    )
 }

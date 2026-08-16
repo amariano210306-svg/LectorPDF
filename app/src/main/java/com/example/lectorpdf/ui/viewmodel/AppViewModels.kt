@@ -13,6 +13,10 @@ import com.example.lectorpdf.LectorApplication
 import com.example.lectorpdf.data.importer.DocumentImporter
 import com.example.lectorpdf.data.importer.ImportResult
 import com.example.lectorpdf.data.local.dao.CollectionSummary
+import com.example.lectorpdf.data.local.dao.FolderDao
+import com.example.lectorpdf.data.local.dao.LibraryFolderRow
+import com.example.lectorpdf.data.local.dao.LibrarySourceRow
+import com.example.lectorpdf.data.local.entity.LibraryFolderEntity
 import com.example.lectorpdf.data.local.dao.ReadingDao
 import com.example.lectorpdf.data.preferences.AppSettings
 import com.example.lectorpdf.data.preferences.SettingsRepository
@@ -33,6 +37,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -117,26 +122,87 @@ data class LibraryUiState(
     val filter: LibraryFilter = LibraryFilter.ALL,
     val sort: LibrarySort = LibrarySort.DATE_ADDED,
     val viewMode: LibraryViewMode = LibraryViewMode.GRID,
+    val section: LibrarySection = LibrarySection.ALL_BOOKS,
+    val sources: List<LibrarySourceRow> = emptyList(),
+    val folders: List<LibraryFolderRow> = emptyList(),
+    val breadcrumb: List<LibraryFolderEntity> = emptyList(),
+    val currentFolderId: Long? = null,
+    val includeSubfolders: Boolean = false,
+)
+
+enum class LibrarySection { FOLDERS, ALL_BOOKS }
+
+private data class FolderContent(
+    val folderId: Long? = null,
+    val folders: List<LibraryFolderRow> = emptyList(),
+    val bookIds: Set<Long> = emptySet(),
+    val breadcrumb: List<LibraryFolderEntity> = emptyList(),
+    val includeSubfolders: Boolean = false,
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LibraryViewModel(
     private val repository: LibraryRepository,
     private val settingsRepository: SettingsRepository,
+    private val folderDao: FolderDao,
 ) : ViewModel() {
     private val search = MutableStateFlow("")
     private val filter = MutableStateFlow(LibraryFilter.ALL)
+    private val section = MutableStateFlow<LibrarySection?>(null)
+    private val currentFolderId = MutableStateFlow<Long?>(null)
+    private val includeSubfolders = MutableStateFlow(false)
 
-    val uiState: StateFlow<LibraryUiState> = combine(search, filter, settingsRepository.settings) { query, activeFilter, settings ->
+    private val booksState = combine(search, filter, settingsRepository.settings) { query, activeFilter, settings ->
         Triple(query, activeFilter, settings)
     }.flatMapLatest { (query, activeFilter, settings) ->
         repository.observeLibrary(query, activeFilter, settings.librarySort).map { books ->
             LibraryUiState(books, query, activeFilter, settings.librarySort, settings.libraryViewMode)
         }
+    }
+
+    private val folderContent = combine(currentFolderId, includeSubfolders) { folderId, descendants -> folderId to descendants }
+        .flatMapLatest { (folderId, descendants) ->
+            if (folderId == null) flowOf(FolderContent())
+            else combine(
+                folderDao.observeChildren(folderId),
+                folderDao.observeBookIds(folderId, descendants),
+                folderDao.observeBreadcrumb(folderId),
+            ) { folders, bookIds, breadcrumb ->
+                FolderContent(folderId, folders, bookIds.toSet(), breadcrumb, descendants)
+            }
+        }
+
+    val uiState: StateFlow<LibraryUiState> = combine(
+        booksState,
+        folderDao.observeSources(),
+        section,
+        folderContent,
+    ) { base, sources, selectedSection, folder ->
+        val effectiveSection = selectedSection ?: if (sources.any { it.type == "SAF_TREE" }) LibrarySection.FOLDERS else LibrarySection.ALL_BOOKS
+        base.copy(
+            books = if (effectiveSection == LibrarySection.FOLDERS && folder.folderId != null) base.books.filter { it.id in folder.bookIds } else base.books,
+            section = effectiveSection,
+            sources = sources,
+            folders = folder.folders,
+            breadcrumb = folder.breadcrumb,
+            currentFolderId = folder.folderId,
+            includeSubfolders = folder.includeSubfolders,
+        )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LibraryUiState())
 
     fun setSearch(value: String) { search.value = value }
     fun setFilter(value: LibraryFilter) { filter.value = value }
+    fun setSection(value: LibrarySection) { section.value = value }
+    fun openSource(source: LibrarySourceRow) { currentFolderId.value = source.rootFolderId; section.value = LibrarySection.FOLDERS }
+    fun openFolder(folderId: Long) { currentFolderId.value = folderId }
+    fun showFolderSources() { currentFolderId.value = null; section.value = LibrarySection.FOLDERS }
+    fun toggleIncludeSubfolders() { includeSubfolders.value = !includeSubfolders.value }
+    fun navigateUp(): Boolean {
+        val current = uiState.value
+        if (current.currentFolderId == null) return false
+        currentFolderId.value = current.breadcrumb.lastOrNull()?.parentFolderId
+        return true
+    }
     fun setSort(value: LibrarySort) = viewModelScope.launch { settingsRepository.setLibrarySort(value) }
     fun toggleViewMode() = viewModelScope.launch {
         val next = if (uiState.value.viewMode == LibraryViewMode.GRID) LibraryViewMode.LIST else LibraryViewMode.GRID
@@ -245,7 +311,7 @@ object AppViewModelProvider {
     val Factory = viewModelFactory {
         initializer { MainViewModel(app(), app().container.settingsRepository, app().container.libraryRepository, app().container.documentScanner) }
         initializer { HomeViewModel(app().container.libraryRepository, app().container.settingsRepository) }
-        initializer { LibraryViewModel(app().container.libraryRepository, app().container.settingsRepository) }
+        initializer { LibraryViewModel(app().container.libraryRepository, app().container.settingsRepository, app().container.folderDao) }
         initializer { FilesViewModel(app().container.documentImporter, app().container.documentScanner, app().container.settingsRepository) }
         initializer { SettingsViewModel(app().container.settingsRepository) }
         initializer { StatsViewModel(app().container.readingDao) }

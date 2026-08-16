@@ -141,7 +141,9 @@ interface BookDao {
             progress = :progress, zoom = :zoom, lastOpenedAt = :openedAt,
             status = :status, pageOffsetFraction = :pageOffsetFraction,
             fitMode = :fitMode, direction = :direction, cropMargins = :cropMargins,
-            orientation = :orientation, rotation = :rotation
+            orientation = :orientation, rotation = :rotation, pdfTheme = :pdfTheme,
+            cropLeft = :cropLeft, cropTop = :cropTop, cropRight = :cropRight,
+            cropBottom = :cropBottom
         WHERE bookId = :bookId
         """,
     )
@@ -159,6 +161,11 @@ interface BookDao {
         cropMargins: Boolean,
         orientation: String,
         rotation: Int,
+        pdfTheme: String,
+        cropLeft: Float,
+        cropTop: Float,
+        cropRight: Float,
+        cropBottom: Float,
     )
 
     @Query("UPDATE book_progress SET totalReadingTimeMillis = totalReadingTimeMillis + :durationMillis WHERE bookId = :bookId")

@@ -2,6 +2,7 @@ package com.example.lectorpdf.reader.pdf
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
@@ -9,8 +10,7 @@ import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
-import android.os.ParcelFileDescriptor
-import android.util.LruCache
+import android.util.Log
 import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -24,34 +24,34 @@ import kotlin.math.sqrt
 
 enum class PdfFitMode { WIDTH, PAGE }
 
-data class PdfSearchResult(val pageIndex: Int, val matchCount: Int)
+data class PdfSearchResult(val pageIndex: Int, val matchCount: Int, val snippet: String? = null)
 
-class PdfDocumentEngine(private val context: Context) : AutoCloseable {
-    private var descriptor: ParcelFileDescriptor? = null
+class PdfDocumentEngine(private val context: Context) {
     private var renderer: PdfRenderer? = null
     private val mutex = Mutex()
+    private val lifecycle = PdfEngineLifecycleGuard()
     private val marginCache = mutableMapOf<Int, RectF>()
     private val memoryClassMb = (context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager).memoryClass
-    private val cacheSizeKb = (memoryClassMb * 1024 / 8).coerceIn(32 * 1024, 96 * 1024)
-    private val cache = object : LruCache<String, Bitmap>(cacheSizeKb) {
-        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount / 1024
-    }
+    private val cacheSizeBytes = (memoryClassMb.toLong() * 1024 * 1024 / 8)
+        .coerceIn(32L * 1024 * 1024, 96L * 1024 * 1024)
+    private val cache = ByteLruCache<String, Bitmap>(cacheSizeBytes)
 
     val pageCount: Int get() = renderer?.pageCount ?: 0
 
     suspend fun open(uri: Uri): Int = withContext(Dispatchers.IO) {
         mutex.withLock {
-            closeInternal()
+            check(lifecycle.current() == PdfEngineLifecycle.NEW) { "Este motor PDF ya fue utilizado" }
+            debugLog("open requested")
             val openedDescriptor = context.contentResolver.openFileDescriptor(uri, "r")
                 ?: error("No se pudo abrir el archivo PDF")
             try {
                 val openedRenderer = PdfRenderer(openedDescriptor)
-                descriptor = openedDescriptor
                 renderer = openedRenderer
+                lifecycle.markOpen()
+                debugLog("renderer opened pages=${openedRenderer.pageCount}")
                 openedRenderer.pageCount
             } catch (error: Throwable) {
                 openedDescriptor.close()
-                descriptor = null
                 throw error
             }
         }
@@ -65,13 +65,16 @@ class PdfDocumentEngine(private val context: Context) : AutoCloseable {
         rotation: Int,
         fitMode: PdfFitMode,
         cropMargins: Boolean,
+        manualCrop: PdfCropInsets = PdfCropInsets(),
         thumbnail: Boolean = false,
     ): Bitmap = withContext(Dispatchers.IO) {
         currentCoroutineContext().ensureActive()
         val widthBucket = if (thumbnail) 176 else ((viewportWidth * zoom).roundToInt() / 32 * 32).coerceIn(320, MAX_BITMAP_DIMENSION.toInt())
         val heightBucket = if (thumbnail) 248 else ((viewportHeight * zoom).roundToInt() / 32 * 32).coerceIn(320, MAX_BITMAP_DIMENSION.toInt())
-        val key = "$pageIndex-$widthBucket-$heightBucket-${rotation.normalizedRotation()}-$fitMode-$cropMargins-$thumbnail"
-        cache.get(key)?.takeUnless(Bitmap::isRecycled) ?: mutex.withLock {
+        val safeManualCrop = manualCrop.normalized()
+        val key = "$pageIndex-$widthBucket-$heightBucket-${rotation.normalizedRotation()}-$fitMode-$cropMargins-$safeManualCrop-$thumbnail"
+        mutex.withLock {
+            lifecycle.requireOpen()
             currentCoroutineContext().ensureActive()
             cache.get(key)?.takeUnless(Bitmap::isRecycled) ?: renderLocked(
                 pageIndex = pageIndex,
@@ -80,21 +83,47 @@ class PdfDocumentEngine(private val context: Context) : AutoCloseable {
                 rotation = rotation.normalizedRotation(),
                 fitMode = fitMode,
                 cropMargins = cropMargins,
+                manualCrop = safeManualCrop,
                 thumbnail = thumbnail,
-            ).also { bitmap -> cache.put(key, bitmap) }
+            ).also { bitmap ->
+                currentCoroutineContext().ensureActive()
+                cache.put(key, bitmap, bitmap.allocationByteCount.toLong())
+                debugLog("cache insert page=$pageIndex bytes=${bitmap.allocationByteCount}")
+            }
         }
     }
 
     suspend fun search(query: String, onPage: suspend (PdfSearchResult) -> Unit) = withContext(Dispatchers.IO) {
         if (Build.VERSION.SDK_INT < 35 || query.isBlank()) return@withContext
         mutex.withLock {
+            lifecycle.requireOpen()
             val activeRenderer = checkNotNull(renderer)
             repeat(activeRenderer.pageCount) { index ->
                 currentCoroutineContext().ensureActive()
                 activeRenderer.openPage(index).use { page ->
                     val matches = page.searchText(query).size
-                    if (matches > 0) onPage(PdfSearchResult(index, matches))
+                    if (matches > 0) {
+                        val pageText = page.textContents.joinToString(" ") { it.text }.replace(Regex("\\s+"), " ")
+                        val matchStart = pageText.indexOf(query, ignoreCase = true)
+                        val snippet = if (matchStart >= 0) {
+                            pageText.substring((matchStart - 45).coerceAtLeast(0), (matchStart + query.length + 75).coerceAtMost(pageText.length))
+                        } else null
+                        onPage(PdfSearchResult(index, matches, snippet))
+                    }
                 }
+            }
+        }
+    }
+
+    suspend fun extractPageText(pageIndex: Int): String? = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < 35) return@withContext null
+        mutex.withLock {
+            lifecycle.requireOpen()
+            val activeRenderer = checkNotNull(renderer)
+            if (pageIndex !in 0 until activeRenderer.pageCount) return@withLock null
+            currentCoroutineContext().ensureActive()
+            activeRenderer.openPage(pageIndex).use { page ->
+                page.textContents.joinToString("\n") { it.text }.trim().ifBlank { null }
             }
         }
     }
@@ -106,16 +135,25 @@ class PdfDocumentEngine(private val context: Context) : AutoCloseable {
         rotation: Int,
         fitMode: PdfFitMode,
         cropMargins: Boolean,
+        manualCrop: PdfCropInsets,
         thumbnail: Boolean,
     ): Bitmap {
         val activeRenderer = checkNotNull(renderer) { "El PDF no está abierto" }
         require(pageIndex in 0 until activeRenderer.pageCount)
         return activeRenderer.openPage(pageIndex).use { page ->
-            val crop = if (cropMargins && !thumbnail) {
+            val automaticCrop = if (cropMargins && !thumbnail) {
                 marginCache.getOrPut(pageIndex) { detectContentBounds(page) }
             } else {
                 FULL_PAGE
             }
+            val crop = if (!thumbnail && !manualCrop.isEmpty) {
+                RectF(
+                    (automaticCrop.left + manualCrop.left).coerceAtMost(.46f),
+                    (automaticCrop.top + manualCrop.top).coerceAtMost(.46f),
+                    (automaticCrop.right - manualCrop.right).coerceAtLeast(.54f),
+                    (automaticCrop.bottom - manualCrop.bottom).coerceAtLeast(.54f),
+                )
+            } else automaticCrop
             val cropWidth = (page.width * crop.width()).coerceAtLeast(1f)
             val cropHeight = (page.height * crop.height()).coerceAtLeast(1f)
             val rotatedWidth = if (rotation == 90 || rotation == 270) cropHeight else cropWidth
@@ -189,18 +227,33 @@ class PdfDocumentEngine(private val context: Context) : AutoCloseable {
         }
     }
 
-    override fun close() = closeInternal()
-
-    suspend fun closeSafely() = withContext(Dispatchers.IO) { mutex.withLock { closeInternal() } }
+    suspend fun closeSafely() = withContext(Dispatchers.IO) {
+        val ownsClose = lifecycle.requestClose()
+        debugLog("close requested ownsClose=$ownsClose")
+        mutex.withLock {
+            if (lifecycle.current() == PdfEngineLifecycle.CLOSED) return@withLock
+            if (!ownsClose && lifecycle.current() != PdfEngineLifecycle.CLOSING) return@withLock
+            closeInternal()
+        }
+    }
 
     private fun closeInternal() {
-        cache.snapshot().values.distinct().filterNot(Bitmap::isRecycled).forEach(Bitmap::recycle)
-        cache.evictAll()
-        marginCache.clear()
-        renderer?.close()
-        descriptor?.close()
+        val activeRenderer = renderer
         renderer = null
-        descriptor = null
+        cache.clear()
+        marginCache.clear()
+        debugLog("cache cleared")
+        try {
+            // PdfRenderer owns and closes the ParcelFileDescriptor supplied to its constructor.
+            activeRenderer?.close()
+            debugLog("renderer and owned descriptor closed")
+        } finally {
+            lifecycle.markClosed()
+        }
+    }
+
+    private fun debugLog(message: String) {
+        if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) Log.d(TAG, message)
     }
 
     private companion object {
@@ -209,6 +262,7 @@ class PdfDocumentEngine(private val context: Context) : AutoCloseable {
         const val WHITE_THRESHOLD = 246
         const val MAX_BITMAP_DIMENSION = 4096f
         const val MAX_BITMAP_PIXELS = 12_000_000f
+        const val TAG = "PdfDocumentEngine"
     }
 }
 

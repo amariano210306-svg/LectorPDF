@@ -2,12 +2,16 @@
 
 package com.example.lectorpdf.reader.pdf
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
@@ -30,6 +34,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -43,6 +48,15 @@ import androidx.compose.material.icons.outlined.FindInPage
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.BookmarkBorder
+import androidx.compose.material.icons.outlined.Brightness6
+import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.Pause
+import androidx.compose.material.icons.outlined.PlayArrow
+import androidx.compose.material.icons.outlined.SkipNext
+import androidx.compose.material.icons.outlined.SkipPrevious
+import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -68,6 +82,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -76,9 +91,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextOverflow
@@ -104,6 +122,25 @@ fun PdfReaderScreen(
     var thumbnailsVisible by remember { mutableStateOf(false) }
     var pageDialogVisible by remember { mutableStateOf(false) }
     var searchVisible by remember { mutableStateOf(false) }
+    var bookmarksVisible by remember { mutableStateOf(false) }
+    var brightnessOverlay by remember { mutableStateOf<Float?>(null) }
+    val currentBrightness by rememberUpdatedState(state.brightness)
+    val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
+        uri?.let(viewModel::exportReaderData)
+    }
+
+    LaunchedEffect(brightnessOverlay) {
+        if (brightnessOverlay != null) {
+            delay(900)
+            brightnessOverlay = null
+        }
+    }
+    LaunchedEffect(state.notice) {
+        if (state.notice != null) {
+            delay(2_800)
+            viewModel.clearNotice()
+        }
+    }
 
     LaunchedEffect(state.controlsVisible, state.focusMode, state.controlsInteractionToken) {
         if (state.controlsVisible && !state.focusMode) {
@@ -112,7 +149,14 @@ fun PdfReaderScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(ReaderBackground)) {
+    Box(
+        Modifier.fillMaxSize()
+            .background(state.readerTheme.readerBackground())
+            .readerBrightnessGesture(
+                current = { currentBrightness },
+                onChange = { value -> viewModel.setBrightness(value); brightnessOverlay = value },
+            ),
+    ) {
         when {
             state.loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
             state.error != null -> ReaderError(state.error, onBack)
@@ -120,10 +164,10 @@ fun PdfReaderScreen(
                 val centerTap = {
                     if (state.focusMode) viewModel.toggleFocusMode() else viewModel.toggleControls()
                 }
-                if (state.direction == PdfPageDirection.CONTINUOUS) {
-                    ContinuousPdfReader(state, viewModel, centerTap)
-                } else {
-                    HorizontalPdfReader(state, viewModel, centerTap)
+                when (state.direction) {
+                    PdfPageDirection.CONTINUOUS -> ContinuousPdfReader(state, viewModel, centerTap)
+                    PdfPageDirection.PAGED_HORIZONTAL -> HorizontalPdfReader(state, viewModel, centerTap)
+                    PdfPageDirection.SPREAD -> SpreadPdfReader(state, viewModel, centerTap)
                 }
                 AnimatedVisibility(
                     visible = state.controlsVisible && !state.focusMode,
@@ -136,6 +180,9 @@ fun PdfReaderScreen(
                         onBack = onBack,
                         onSearch = { searchVisible = true; viewModel.noteControlsInteraction() },
                         onSettings = { settingsVisible = true; viewModel.noteControlsInteraction() },
+                        onBookmark = viewModel::toggleBookmark,
+                        onBookmarks = { bookmarksVisible = true; viewModel.noteControlsInteraction() },
+                        onExport = { exportLauncher.launch("anotaciones-${state.currentPage + 1}.md") },
                         onRotate = viewModel::rotate,
                         onFocus = viewModel::toggleFocusMode,
                     )
@@ -153,6 +200,26 @@ fun PdfReaderScreen(
                         onGoTo = { pageDialogVisible = true; viewModel.noteControlsInteraction() },
                         onInteraction = viewModel::noteControlsInteraction,
                     )
+                }
+                brightnessOverlay?.let { brightness ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = .92f),
+                        shape = MaterialTheme.shapes.large,
+                        modifier = Modifier.align(Alignment.CenterStart).padding(start = 20.dp),
+                    ) {
+                        Row(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Outlined.Brightness6, null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("${(brightness * 100).toInt()}%")
+                        }
+                    }
+                }
+                state.notice?.let { notice ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.inverseSurface,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 92.dp, start = 20.dp, end = 20.dp),
+                    ) { Text(notice, modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) }
                 }
             }
         }
@@ -185,6 +252,12 @@ fun PdfReaderScreen(
         SearchDialog(state, viewModel, onDismiss = { searchVisible = false }) {
             viewModel.goToPage(it)
             searchVisible = false
+        }
+    }
+    if (bookmarksVisible) {
+        BookmarkSheet(state, viewModel, onDismiss = { bookmarksVisible = false }) { bookmark ->
+            viewModel.goToBookmark(bookmark)
+            bookmarksVisible = false
         }
     }
 }
@@ -312,6 +385,62 @@ private fun HorizontalPdfReader(
 }
 
 @Composable
+private fun SpreadPdfReader(
+    state: PdfReaderUiState,
+    viewModel: PdfReaderViewModel,
+    onCenterTap: () -> Unit,
+) {
+    val spreadCount = (state.pageCount + 1) / 2
+    val pagerState = rememberPagerState(
+        initialPage = (state.currentPage / 2).coerceIn(0, (spreadCount - 1).coerceAtLeast(0)),
+        pageCount = { spreadCount },
+    )
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
+    LaunchedEffect(state.navigationToken) {
+        val spread = (state.currentPage / 2).coerceIn(0, (spreadCount - 1).coerceAtLeast(0))
+        if (pagerState.currentPage != spread) pagerState.scrollToPage(spread)
+    }
+    LaunchedEffect(pagerState) {
+        snapshotFlow { pagerState.currentPage }.distinctUntilChanged().collect { spread ->
+            val first = spread * 2
+            viewModel.setVisiblePages(setOf(first, first + 1).filter { it < state.pageCount }.toSet())
+            viewModel.updateReadingPosition(first, 0f)
+        }
+    }
+    HorizontalPager(
+        state = pagerState,
+        beyondViewportPageCount = 1,
+        userScrollEnabled = state.zoom <= 1.01f,
+        modifier = Modifier.fillMaxSize().onSizeChanged { viewport = it },
+    ) { spread ->
+        Row(
+            Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            repeat(2) { side ->
+                val page = spread * 2 + side
+                if (page < state.pageCount) {
+                    val bitmap = state.pages[page]
+                    val aspect = bitmap?.takeUnless { it.isRecycled }?.let { it.width.toFloat() / it.height } ?: .707f
+                    PdfPageSurface(
+                        page = page,
+                        state = state,
+                        viewModel = viewModel,
+                        viewport = IntSize((viewport.width / 2).coerceAtLeast(1), viewport.height),
+                        aspect = aspect,
+                        modifier = Modifier.weight(1f).fillMaxHeight(),
+                        onCenterTap = onCenterTap,
+                        pageMode = true,
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun PdfPageSurface(
     page: Int,
     state: PdfReaderUiState,
@@ -334,7 +463,7 @@ private fun PdfPageSurface(
         viewModel.setZoom(nextZoom)
     }
     LaunchedEffect(state.zoom) { if (state.zoom <= 1.01f) offset = Offset.Zero }
-    LaunchedEffect(page, viewport, state.zoom, state.rotation, state.fitMode, state.cropMargins) {
+    LaunchedEffect(page, viewport, state.zoom, state.rotation, state.fitMode, state.cropMargins, state.manualCrop) {
         if (viewport != IntSize.Zero) {
             delay(110)
             viewModel.requestPage(page, viewport.width.coerceAtLeast(320), viewport.height.coerceAtLeast(320))
@@ -360,6 +489,7 @@ private fun PdfPageSurface(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Página ${page + 1} de ${state.pageCount}",
                 contentScale = if (pageMode) ContentScale.Fit else ContentScale.FillBounds,
+                colorFilter = state.readerTheme.colorFilter(),
                 modifier = Modifier.fillMaxSize().graphicsLayer {
                     scaleX = state.zoom
                     scaleY = state.zoom
@@ -393,10 +523,14 @@ private fun ReaderTopBar(
     onBack: () -> Unit,
     onSearch: () -> Unit,
     onSettings: () -> Unit,
+    onBookmark: () -> Unit,
+    onBookmarks: () -> Unit,
+    onExport: () -> Unit,
     onRotate: () -> Unit,
     onFocus: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
+    val bookmarked = state.bookmarks.any { PdfBookmarkCodec.decode(it.locatorJson)?.page == state.currentPage }
     Surface(color = MaterialTheme.colorScheme.surface.copy(alpha = .96f), shadowElevation = 4.dp) {
         Row(
             Modifier.fillMaxWidth()
@@ -412,10 +546,23 @@ private fun ReaderTopBar(
             IconButton(onClick = onSearch, enabled = state.searchSupported) {
                 Icon(Icons.Outlined.FindInPage, if (state.searchSupported) "Buscar en el PDF" else "Búsqueda disponible desde Android 15")
             }
+            IconButton(onClick = onBookmark) {
+                Icon(if (bookmarked) Icons.Outlined.Bookmark else Icons.Outlined.BookmarkBorder, if (bookmarked) "Quitar marcador" else "Añadir marcador")
+            }
             IconButton(onClick = onSettings) { Icon(Icons.Outlined.Tune, "Ajustes de lectura") }
             Box {
                 IconButton(onClick = { menuExpanded = true }) { Icon(Icons.Outlined.MoreVert, "Más opciones") }
                 DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Ver marcadores (${state.bookmarks.size})") },
+                        leadingIcon = { Icon(Icons.Outlined.Bookmark, null) },
+                        onClick = { menuExpanded = false; onBookmarks() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Exportar notas y marcadores") },
+                        leadingIcon = { Icon(Icons.Outlined.BookmarkBorder, null) },
+                        onClick = { menuExpanded = false; onExport() },
+                    )
                     DropdownMenuItem(
                         text = { Text("Rotar página") },
                         leadingIcon = { Icon(Icons.AutoMirrored.Outlined.RotateRight, null) },
@@ -494,12 +641,13 @@ private fun ReaderSettingsSheet(
             item { Text("Opciones de PDF", style = MaterialTheme.typography.titleLarge) }
             item { Text("Desplazamiento", style = MaterialTheme.typography.titleMedium) }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    PdfPageDirection.entries.forEach { direction ->
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(count = PdfPageDirection.entries.size) { index ->
+                        val direction = PdfPageDirection.entries[index]
                         FilterChip(
                             selected = state.direction == direction,
                             onClick = { viewModel.setDirection(direction) },
-                            label = { Text(if (direction == PdfPageDirection.CONTINUOUS) "Continuo" else "Página horizontal") },
+                            label = { Text(direction.label()) },
                         )
                     }
                 }
@@ -513,6 +661,14 @@ private fun ReaderSettingsSheet(
                 }
             }
             item { SettingToggle("Recortar márgenes", "Estima el contenido visible sin modificar el archivo.", state.cropMargins, viewModel::setCropMargins) }
+            item { Text("Recorte manual", style = MaterialTheme.typography.titleMedium) }
+            item { CropSlider("Izquierdo", state.manualCrop.left) { viewModel.setManualCrop(state.manualCrop.copy(left = it)) } }
+            item { CropSlider("Derecho", state.manualCrop.right) { viewModel.setManualCrop(state.manualCrop.copy(right = it)) } }
+            item { CropSlider("Superior", state.manualCrop.top) { viewModel.setManualCrop(state.manualCrop.copy(top = it)) } }
+            item { CropSlider("Inferior", state.manualCrop.bottom) { viewModel.setManualCrop(state.manualCrop.copy(bottom = it)) } }
+            if (!state.manualCrop.isEmpty) {
+                item { TextButton(onClick = { viewModel.setManualCrop(PdfCropInsets()) }) { Text("Restablecer recorte manual") } }
+            }
             item {
                 OutlinedButton(onClick = viewModel::rotate, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.AutoMirrored.Outlined.RotateRight, null)
@@ -533,10 +689,43 @@ private fun ReaderSettingsSheet(
                 }
             }
             item { HorizontalDivider() }
+            item { Text("Tema", style = MaterialTheme.typography.titleMedium) }
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(count = PdfReaderTheme.entries.size) { index ->
+                        val theme = PdfReaderTheme.entries[index]
+                        FilterChip(
+                            selected = state.readerTheme == theme,
+                            onClick = { viewModel.setReaderTheme(theme) },
+                            label = { Text(theme.label()) },
+                        )
+                    }
+                }
+            }
             item { SettingToggle("Mantener pantalla activa", "Evita que se apague mientras lees.", keepScreenOn, onSetKeepScreenOn) }
             item { SettingToggle("Botones de volumen", "Avanzan o retroceden una página.", volumeButtonsTurnPages, onSetVolumeButtons) }
             item { SettingToggle("Brillo del sistema", "Usa el brillo normal del dispositivo.", state.brightness < 0f) { viewModel.setBrightness(if (it) -1f else .5f) } }
             if (state.brightness >= 0f) item { Slider(state.brightness, viewModel::setBrightness, valueRange = .05f..1f) }
+            item { HorizontalDivider() }
+            item { Text("Text To Speech", style = MaterialTheme.typography.titleMedium) }
+            if (!state.ttsSupported) {
+                item { Text("La extracción de texto PDF requiere Android 15 o posterior.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            } else {
+                item {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = viewModel::previousTtsFragment, enabled = state.ttsFragmentCount > 0) { Icon(Icons.Outlined.SkipPrevious, "Fragmento anterior") }
+                        IconButton(onClick = viewModel::playOrPauseTts) { Icon(if (state.ttsPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow, if (state.ttsPlaying) "Pausar" else "Reproducir") }
+                        IconButton(onClick = viewModel::stopTts, enabled = state.ttsPlaying || state.ttsPaused) { Icon(Icons.Outlined.Stop, "Detener") }
+                        IconButton(onClick = viewModel::nextTtsFragment, enabled = state.ttsFragmentCount > 0) { Icon(Icons.Outlined.SkipNext, "Fragmento siguiente") }
+                    }
+                }
+                state.ttsMessage?.let { message -> item { Text(message, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+                if (state.ttsPage != null) {
+                    item { Text("Página ${state.ttsPage + 1} · fragmento ${state.ttsFragment + 1}/${state.ttsFragmentCount}", style = MaterialTheme.typography.bodySmall) }
+                }
+                item { ReaderValueSlider("Velocidad", state.ttsRate, .5f..2f, viewModel::setTtsRate) }
+                item { ReaderValueSlider("Tono", state.ttsPitch, .5f..1.5f, viewModel::setTtsPitch) }
+            }
             item {
                 OutlinedButton(onClick = { onDismiss(); viewModel.toggleFocusMode() }, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.Outlined.CenterFocusStrong, null)
@@ -556,6 +745,72 @@ private fun SettingToggle(title: String, description: String, checked: Boolean, 
             Text(description, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
         }
         Switch(checked = checked, onCheckedChange = onChecked)
+    }
+}
+
+@Composable
+private fun CropSlider(label: String, value: Float, onValueChange: (Float) -> Unit) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text("${(value * 100).toInt()}%", style = MaterialTheme.typography.labelMedium)
+        }
+        Slider(value = value, onValueChange = onValueChange, valueRange = 0f..PdfCropInsets.MAX_SIDE)
+    }
+}
+
+@Composable
+private fun ReaderValueSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onValueChange: (Float) -> Unit) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label)
+            Text("${(value * 10).toInt() / 10f}x", style = MaterialTheme.typography.labelMedium)
+        }
+        Slider(value = value, onValueChange = onValueChange, valueRange = range)
+    }
+}
+
+@Composable
+private fun BookmarkSheet(
+    state: PdfReaderUiState,
+    viewModel: PdfReaderViewModel,
+    onDismiss: () -> Unit,
+    onPage: (com.example.lectorpdf.data.local.entity.BookmarkEntity) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxHeight(.68f).padding(horizontal = 18.dp)) {
+            Text("Marcadores", style = MaterialTheme.typography.titleLarge)
+            if (state.bookmarks.isEmpty()) {
+                Text(
+                    "Añade un marcador desde la barra superior para volver a este punto.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 18.dp),
+                )
+            } else {
+                LazyColumn(Modifier.fillMaxSize().padding(top = 10.dp)) {
+                    items(count = state.bookmarks.size, key = { state.bookmarks[it].id }) { index ->
+                        val bookmark = state.bookmarks[index]
+                        val locator = PdfBookmarkCodec.decode(bookmark.locatorJson)
+                        Surface(onClick = { onPage(bookmark) }, modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Outlined.Bookmark, null)
+                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(bookmark.label ?: "Página ${(locator?.page ?: 0) + 1}")
+                                    Text(
+                                        "Página ${(locator?.page ?: 0) + 1} · ${(locator?.offsetFraction?.times(100))?.toInt() ?: 0}% de la página",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                IconButton(onClick = { viewModel.deleteBookmark(bookmark.id) }) {
+                                    Icon(Icons.Outlined.DeleteOutline, "Eliminar marcador")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -614,7 +869,12 @@ private fun SearchDialog(state: PdfReaderUiState, viewModel: PdfReaderViewModel,
                     items(count = state.searchResults.size, key = { state.searchResults[it].pageIndex }) { index ->
                         val result = state.searchResults[index]
                         Surface(onClick = { onPage(result.pageIndex) }, modifier = Modifier.fillMaxWidth()) {
-                            Text("Página ${result.pageIndex + 1} · ${result.matchCount} coincidencias", modifier = Modifier.padding(vertical = 12.dp))
+                            Column(Modifier.padding(vertical = 12.dp)) {
+                                Text("Página ${result.pageIndex + 1} · ${result.matchCount} coincidencias")
+                                result.snippet?.let {
+                                    Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
                         }
                     }
                 }
@@ -638,6 +898,69 @@ private fun ReaderError(message: String, onBack: () -> Unit) {
 }
 
 private data class VisibleSnapshot(val start: Int, val end: Int, val pages: List<PdfVisiblePage>)
+
+private fun Modifier.readerBrightnessGesture(current: () -> Float, onChange: (Float) -> Unit): Modifier =
+    pointerInput(Unit) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            if (down.position.x > 36.dp.toPx()) return@awaitEachGesture
+            val initial = current()
+            var value = if (initial < 0f) .5f else initial
+            while (true) {
+                val event = awaitPointerEvent()
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                if (!change.pressed) break
+                val delta = change.positionChange().y
+                if (delta != 0f) {
+                    value = (value - delta / size.height.coerceAtLeast(1)).coerceIn(.05f, 1f)
+                    change.consume()
+                    onChange(value)
+                }
+            }
+        }
+    }
+
+private fun PdfReaderTheme.readerBackground(): Color = when (this) {
+    PdfReaderTheme.DAY -> ReaderBackground
+    PdfReaderTheme.NIGHT -> Color.Black
+    PdfReaderTheme.SEPIA -> Color(0xFF30291F)
+    PdfReaderTheme.CONSOLE -> Color(0xFF00120A)
+}
+
+private fun PdfReaderTheme.colorFilter(): ColorFilter? = when (this) {
+    PdfReaderTheme.DAY -> null
+    PdfReaderTheme.NIGHT -> ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
+        -.82f, 0f, 0f, 0f, 225f,
+        0f, -.82f, 0f, 0f, 225f,
+        0f, 0f, -.82f, 0f, 225f,
+        0f, 0f, 0f, 1f, 0f,
+    )))
+    PdfReaderTheme.SEPIA -> ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
+        .393f, .769f, .189f, 0f, -12f,
+        .349f, .686f, .168f, 0f, -8f,
+        .272f, .534f, .131f, 0f, 4f,
+        0f, 0f, 0f, 1f, 0f,
+    )))
+    PdfReaderTheme.CONSOLE -> ColorFilter.colorMatrix(ColorMatrix(floatArrayOf(
+        0f, 0f, 0f, 0f, 0f,
+        .30f, .59f, .11f, 0f, 0f,
+        .05f, .12f, .03f, 0f, 0f,
+        0f, 0f, 0f, 1f, 0f,
+    )))
+}
+
+private fun PdfPageDirection.label(): String = when (this) {
+    PdfPageDirection.CONTINUOUS -> "Continuo"
+    PdfPageDirection.PAGED_HORIZONTAL -> "Página horizontal"
+    PdfPageDirection.SPREAD -> "Doble página"
+}
+
+private fun PdfReaderTheme.label(): String = when (this) {
+    PdfReaderTheme.DAY -> "Día"
+    PdfReaderTheme.NIGHT -> "Noche"
+    PdfReaderTheme.SEPIA -> "Sepia"
+    PdfReaderTheme.CONSOLE -> "Consola"
+}
 
 private fun ReaderOrientation.label() = when (this) {
     ReaderOrientation.AUTO -> "Automática"

@@ -1,6 +1,7 @@
 package com.example.lectorpdf.reader.pdf
 
 import android.content.pm.ActivityInfo
+import android.content.Intent
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.WindowManager
@@ -8,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.activity.addCallback
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -19,6 +21,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.example.lectorpdf.LectorApplication
+import com.example.lectorpdf.MainActivity
 import com.example.lectorpdf.data.preferences.AppSettings
 import com.example.lectorpdf.ui.theme.LectorPDFTheme
 import kotlinx.coroutines.launch
@@ -31,6 +34,7 @@ class PdfReaderActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (bookId <= 0) { finish(); return }
+        onBackPressedDispatcher.addCallback(this) { exitReader() }
         enableEdgeToEdge()
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
@@ -63,7 +67,7 @@ class PdfReaderActivity : ComponentActivity() {
                     volumeButtonsTurnPages = settings.volumeButtonsTurnPages,
                     onSetKeepScreenOn = { value -> lifecycleScope.launch { (application as LectorApplication).container.settingsRepository.setKeepScreenOn(value) } },
                     onSetVolumeButtons = { value -> lifecycleScope.launch { (application as LectorApplication).container.settingsRepository.setVolumeButtons(value) } },
-                    onBack = ::finish,
+                    onBack = ::exitReader,
                     onOrientation = ::setReaderOrientation,
                 )
             }
@@ -113,7 +117,21 @@ class PdfReaderActivity : ComponentActivity() {
         }
     }
 
-    companion object { const val EXTRA_BOOK_ID = "book_id" }
+    private fun exitReader() {
+        if (intent.getBooleanExtra(EXTRA_RETURN_TO_HOME, false) || isTaskRoot) {
+            startActivity(
+                Intent(this, MainActivity::class.java)
+                    .putExtra(MainActivity.EXTRA_SKIP_AUTO_RESUME, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
+            )
+        }
+        finish()
+    }
+
+    companion object {
+        const val EXTRA_BOOK_ID = "book_id"
+        const val EXTRA_RETURN_TO_HOME = "return_to_home"
+    }
 }
 
 enum class ReaderOrientation { AUTO, PORTRAIT, LANDSCAPE }

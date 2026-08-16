@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -30,6 +31,8 @@ data class AppSettings(
     val scanFolderUris: Set<String> = emptySet(),
     val resumeLastReading: Boolean = true,
     val lastOpenedBookId: Long? = null,
+    val pdfTtsRate: Float = 1f,
+    val pdfTtsPitch: Float = 1f,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -46,6 +49,8 @@ class SettingsRepository(private val context: Context) {
         val scanFolderUris = stringSetPreferencesKey("scan_folder_uris")
         val resumeLastReading = booleanPreferencesKey("resume_last_reading")
         val lastOpenedBookId = longPreferencesKey("last_opened_book_id")
+        val pdfTtsRate = floatPreferencesKey("pdf_tts_rate")
+        val pdfTtsPitch = floatPreferencesKey("pdf_tts_pitch")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data
@@ -64,6 +69,8 @@ class SettingsRepository(private val context: Context) {
                 scanFolderUris = preferences[Keys.scanFolderUris] ?: emptySet(),
                 resumeLastReading = preferences[Keys.resumeLastReading] ?: true,
                 lastOpenedBookId = preferences[Keys.lastOpenedBookId],
+                pdfTtsRate = (preferences[Keys.pdfTtsRate] ?: 1f).coerceIn(.5f, 2f),
+                pdfTtsPitch = (preferences[Keys.pdfTtsPitch] ?: 1f).coerceIn(.5f, 1.5f),
             )
         }
 
@@ -83,6 +90,8 @@ class SettingsRepository(private val context: Context) {
     }
     suspend fun setResumeLastReading(value: Boolean) = set(Keys.resumeLastReading, value)
     suspend fun setLastOpenedBook(bookId: Long) = set(Keys.lastOpenedBookId, bookId)
+    suspend fun setPdfTtsRate(value: Float) = set(Keys.pdfTtsRate, value.coerceIn(.5f, 2f))
+    suspend fun setPdfTtsPitch(value: Float) = set(Keys.pdfTtsPitch, value.coerceIn(.5f, 1.5f))
     suspend fun clearLastOpenedBook() {
         context.settingsDataStore.edit { it.remove(Keys.lastOpenedBookId) }
     }

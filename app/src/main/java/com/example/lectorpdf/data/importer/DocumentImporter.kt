@@ -6,7 +6,11 @@ import android.content.Intent
 import android.database.Cursor
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.example.lectorpdf.data.local.dao.FolderDao
+import com.example.lectorpdf.data.local.entity.BookFolderEntity
 import com.example.lectorpdf.data.local.entity.BookEntity
+import com.example.lectorpdf.data.local.entity.LibraryFolderEntity
+import com.example.lectorpdf.data.local.entity.LibrarySourceEntity
 import com.example.lectorpdf.data.repository.LibraryRepository
 import com.example.lectorpdf.domain.model.BookFormat
 import kotlinx.coroutines.Dispatchers
@@ -23,18 +27,39 @@ data class ImportResult(
 class DocumentImporter(
     private val context: Context,
     private val libraryRepository: LibraryRepository,
+    private val folderDao: FolderDao,
 ) {
     suspend fun import(uris: List<Uri>): ImportResult = withContext(Dispatchers.IO) {
         var imported = 0
         var duplicates = 0
         var rejected = 0
         val messages = mutableListOf<String>()
+        val sourceId = folderDao.upsertSource(
+            LibrarySourceEntity(
+                stableKey = MANUAL_SOURCE_KEY,
+                type = "MANUAL",
+                displayName = "Importados manualmente",
+                rootDocumentId = MANUAL_ROOT_ID,
+                lastScannedAt = System.currentTimeMillis(),
+            ),
+        )
+        val folderId = folderDao.upsertFolder(
+            LibraryFolderEntity(
+                sourceId = sourceId,
+                documentId = MANUAL_ROOT_ID,
+                displayName = "Importados manualmente",
+                depth = 0,
+                relativePath = "Importados manualmente",
+                lastSeenScanId = System.currentTimeMillis(),
+            ),
+        )
 
         uris.distinct().forEach { uri ->
             runCatching {
                 persistReadAccess(uri)
                 val metadata = readMetadata(uri) ?: error("No se pudo leer el archivo")
-                val (_, wasInserted) = libraryRepository.importBook(metadata)
+                val (bookId, wasInserted) = libraryRepository.importBook(metadata)
+                folderDao.linkBook(BookFolderEntity(bookId, folderId, sourceId))
                 if (wasInserted) imported++ else duplicates++
             }.onFailure { error ->
                 rejected++
@@ -88,5 +113,10 @@ class DocumentImporter(
         val name = if (nameIndex >= 0 && !cursor.isNull(nameIndex)) cursor.getString(nameIndex) else return null
         val size = if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) cursor.getLong(sizeIndex) else 0L
         return name to size
+    }
+
+    private companion object {
+        const val MANUAL_SOURCE_KEY = "manual-imports"
+        const val MANUAL_ROOT_ID = "manual-root"
     }
 }

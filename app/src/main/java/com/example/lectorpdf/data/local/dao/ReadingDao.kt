@@ -14,6 +14,17 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ReadingDao {
     @Insert suspend fun insertBookmark(bookmark: BookmarkEntity): Long
+    @Query("DELETE FROM bookmarks WHERE id = :bookmarkId")
+    suspend fun deleteBookmark(bookmarkId: Long)
+
+    @Query("SELECT * FROM bookmarks WHERE bookId = :bookId ORDER BY createdAt ASC")
+    suspend fun getBookmarks(bookId: Long): List<BookmarkEntity>
+
+    @Query("SELECT * FROM highlights WHERE bookId = :bookId ORDER BY createdAt ASC")
+    suspend fun getHighlights(bookId: Long): List<HighlightEntity>
+
+    @Query("SELECT * FROM notes WHERE bookId = :bookId ORDER BY createdAt ASC")
+    suspend fun getNotes(bookId: Long): List<NoteEntity>
     @Insert suspend fun insertHighlight(highlight: HighlightEntity): Long
     @Insert suspend fun insertNote(note: NoteEntity): Long
     @Insert suspend fun insertSession(session: ReadingSessionEntity): Long

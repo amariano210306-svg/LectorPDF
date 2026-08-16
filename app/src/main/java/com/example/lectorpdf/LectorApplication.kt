@@ -17,18 +17,20 @@ class LectorApplication : Application() {
 }
 
 class AppContainer(private val application: Application) {
+    internal val autoResumeCoordinator = AutoResumeCoordinator()
     private val database: LectorDatabase = Room.databaseBuilder(
         application,
         LectorDatabase::class.java,
         "lector.db",
-    ).addMigrations(LectorDatabase.MIGRATION_1_2).build()
+    ).addMigrations(LectorDatabase.MIGRATION_1_2, LectorDatabase.MIGRATION_2_3).build()
 
     val settingsRepository = SettingsRepository(application)
     val libraryRepository = LibraryRepository(database.bookDao(), database.collectionDao())
-    val documentImporter = DocumentImporter(application, libraryRepository)
-    val documentScanner = DocumentScanner(application, libraryRepository, settingsRepository)
+    val documentImporter = DocumentImporter(application, libraryRepository, database.folderDao())
+    val documentScanner = DocumentScanner(application, libraryRepository, settingsRepository, database.folderDao())
     val readingDao = database.readingDao()
     val bookDao = database.bookDao()
+    val folderDao = database.folderDao()
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     fun createPdfEngine() = PdfDocumentEngine(application)
 }

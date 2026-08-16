@@ -3,6 +3,9 @@ package com.example.lectorpdf.reader.pdf
 import android.app.Application
 import android.graphics.Bitmap
 import android.os.Build
+import android.net.Uri
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -11,19 +14,24 @@ import com.example.lectorpdf.LectorApplication
 import com.example.lectorpdf.data.local.dao.BookDao
 import com.example.lectorpdf.data.local.dao.ReadingDao
 import com.example.lectorpdf.data.local.entity.ReadingSessionEntity
+import com.example.lectorpdf.data.local.entity.BookmarkEntity
 import com.example.lectorpdf.data.preferences.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
 
-enum class PdfPageDirection { CONTINUOUS, PAGED_HORIZONTAL }
+enum class PdfPageDirection { CONTINUOUS, PAGED_HORIZONTAL, SPREAD }
 
 data class PdfReaderUiState(
     val loading: Boolean = true,
@@ -45,14 +53,29 @@ data class PdfReaderUiState(
     val searching: Boolean = false,
     val pageOffsetFraction: Float = 0f,
     val cropMargins: Boolean = false,
+    val manualCrop: PdfCropInsets = PdfCropInsets(),
+    val readerTheme: PdfReaderTheme = PdfReaderTheme.DAY,
+    val bookmarks: List<BookmarkEntity> = emptyList(),
     val orientation: ReaderOrientation = ReaderOrientation.AUTO,
     val navigationToken: Long = 0,
     val controlsInteractionToken: Long = 0,
+    val ttsReady: Boolean = false,
+    val ttsPlaying: Boolean = false,
+    val ttsPaused: Boolean = false,
+    val ttsRate: Float = 1f,
+    val ttsPitch: Float = 1f,
+    val ttsPage: Int? = null,
+    val ttsFragment: Int = 0,
+    val ttsFragmentCount: Int = 0,
+    val ttsMessage: String? = null,
+    val notice: String? = null,
 ) {
     val searchSupported: Boolean get() = Build.VERSION.SDK_INT >= 35
+    val ttsSupported: Boolean get() = Build.VERSION.SDK_INT >= 35
 }
 
 class PdfReaderViewModel(
+    private val application: Application,
     private val bookId: Long,
     private val engine: PdfDocumentEngine,
     private val bookDao: BookDao,
@@ -71,8 +94,26 @@ class PdfReaderViewModel(
     private var sessionStartProgress = 0f
     private var previousStatus = "UNREAD"
     private var lastLandscapeViewport: Boolean? = null
+    private var cleared = false
+    private var textToSpeech: TextToSpeech? = null
+    private var speechFragments: List<String> = emptyList()
+    private var speechFragmentIndex = 0
+    private var speechPage = 0
+    private var playWhenTtsReady = false
 
     init {
+        viewModelScope.launch {
+            settingsRepository.settings.collect { settings ->
+                if (!mutableState.value.ttsPlaying) {
+                    mutableState.update { it.copy(ttsRate = settings.pdfTtsRate, ttsPitch = settings.pdfTtsPitch) }
+                }
+            }
+        }
+        viewModelScope.launch {
+            readingDao.observeBookmarks(bookId).collect { bookmarks ->
+                mutableState.update { it.copy(bookmarks = bookmarks) }
+            }
+        }
         viewModelScope.launch {
             runCatching {
                 val book = checkNotNull(bookDao.findById(bookId)) { "El libro ya no está en la biblioteca" }
@@ -92,6 +133,13 @@ class PdfReaderViewModel(
                         direction = progress?.direction.toPdfDirection(),
                         pageOffsetFraction = (progress?.pageOffsetFraction ?: 0f).coerceIn(0f, 1f),
                         cropMargins = progress?.cropMargins ?: false,
+                        manualCrop = PdfCropInsets(
+                            left = progress?.cropLeft ?: 0f,
+                            top = progress?.cropTop ?: 0f,
+                            right = progress?.cropRight ?: 0f,
+                            bottom = progress?.cropBottom ?: 0f,
+                        ).normalized(),
+                        readerTheme = progress?.pdfTheme.toEnumOrDefault(PdfReaderTheme.DAY),
                         orientation = progress?.orientation.toEnumOrDefault(ReaderOrientation.AUTO),
                         rotation = progress?.rotation ?: 0,
                         navigationToken = 1,
@@ -103,6 +151,7 @@ class PdfReaderViewModel(
     }
 
     fun requestPage(page: Int, width: Int, height: Int, thumbnail: Boolean = false) {
+        if (cleared) return
         val state = mutableState.value
         if (page !in 0 until state.pageCount || width <= 0 || height <= 0) return
         if (thumbnail) {
@@ -120,6 +169,7 @@ class PdfReaderViewModel(
                     rotation = state.rotation,
                     fitMode = if (thumbnail) PdfFitMode.PAGE else state.fitMode,
                     cropMargins = state.cropMargins,
+                    manualCrop = state.manualCrop,
                     thumbnail = thumbnail,
                 )
                 coroutineContext.ensureActive()
@@ -198,6 +248,14 @@ class PdfReaderViewModel(
     fun setDirection(value: PdfPageDirection) { mutableState.update { it.copy(direction = value, zoom = 1f, pages = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
     fun setOrientation(value: ReaderOrientation) { mutableState.update { it.copy(orientation = value) }; scheduleProgressSave() }
     fun setCropMargins(value: Boolean) { mutableState.update { it.copy(cropMargins = value, pages = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
+    fun setManualCrop(value: PdfCropInsets) {
+        mutableState.update { it.copy(manualCrop = value.normalized(), pages = emptyMap(), navigationToken = it.navigationToken + 1) }
+        scheduleProgressSave()
+    }
+    fun setReaderTheme(value: PdfReaderTheme) {
+        mutableState.update { it.copy(readerTheme = value) }
+        scheduleProgressSave()
+    }
     fun setBrightness(value: Float) = mutableState.update {
         it.copy(brightness = if (value < 0f) -1f else value.coerceIn(.05f, 1f))
     }
@@ -206,6 +264,205 @@ class PdfReaderViewModel(
     fun noteControlsInteraction() = mutableState.update { it.copy(controlsInteractionToken = it.controlsInteractionToken + 1) }
     fun hideControls() = mutableState.update { it.copy(controlsVisible = false) }
     fun toggleFocusMode() = mutableState.update { it.copy(focusMode = !it.focusMode, controlsVisible = it.focusMode, controlsInteractionToken = it.controlsInteractionToken + 1) }
+
+    fun toggleBookmark() {
+        val state = mutableState.value
+        val existing = state.bookmarks.firstOrNull {
+            PdfBookmarkCodec.decode(it.locatorJson)?.page == state.currentPage
+        }
+        viewModelScope.launch {
+            if (existing != null) {
+                readingDao.deleteBookmark(existing.id)
+            } else {
+                readingDao.insertBookmark(
+                    BookmarkEntity(
+                        bookId = bookId,
+                        locatorJson = PdfBookmarkCodec.encode(state.currentPage, state.pageOffsetFraction),
+                        label = "Página ${state.currentPage + 1}",
+                    ),
+                )
+            }
+        }
+    }
+
+    fun deleteBookmark(bookmarkId: Long) = viewModelScope.launch { readingDao.deleteBookmark(bookmarkId) }
+
+    fun goToBookmark(bookmark: BookmarkEntity) {
+        val locator = PdfBookmarkCodec.decode(bookmark.locatorJson) ?: return
+        val safePage = locator.page.coerceIn(0, (mutableState.value.pageCount - 1).coerceAtLeast(0))
+        mutableState.update {
+            it.copy(currentPage = safePage, pageOffsetFraction = locator.offsetFraction, navigationToken = it.navigationToken + 1)
+        }
+        scheduleProgressSave()
+    }
+
+    fun playOrPauseTts() {
+        val state = mutableState.value
+        if (!state.ttsSupported) {
+            mutableState.update { it.copy(ttsMessage = "La lectura de texto PDF requiere Android 15 o posterior.") }
+            return
+        }
+        when {
+            state.ttsPlaying -> pauseTts()
+            state.ttsPaused && speechFragments.isNotEmpty() -> speakCurrentFragment()
+            state.ttsReady -> loadSpeechPage(state.currentPage)
+            else -> initializeTts()
+        }
+    }
+
+    fun stopTts() {
+        textToSpeech?.stop()
+        speechFragments = emptyList()
+        speechFragmentIndex = 0
+        mutableState.update { it.copy(ttsPlaying = false, ttsPaused = false, ttsPage = null, ttsFragment = 0, ttsFragmentCount = 0, ttsMessage = null) }
+    }
+
+    fun nextTtsFragment() {
+        if (speechFragments.isEmpty()) return
+        if (speechFragmentIndex < speechFragments.lastIndex) {
+            speechFragmentIndex++
+            speakCurrentFragment()
+        } else {
+            loadSpeechPage(speechPage + 1)
+        }
+    }
+
+    fun previousTtsFragment() {
+        if (speechFragments.isEmpty()) return
+        if (speechFragmentIndex > 0) {
+            speechFragmentIndex--
+            speakCurrentFragment()
+        } else {
+            loadSpeechPage((speechPage - 1).coerceAtLeast(0), startAtEnd = true)
+        }
+    }
+
+    fun setTtsRate(value: Float) {
+        val safe = value.coerceIn(.5f, 2f)
+        textToSpeech?.setSpeechRate(safe)
+        mutableState.update { it.copy(ttsRate = safe) }
+        viewModelScope.launch { settingsRepository.setPdfTtsRate(safe) }
+    }
+
+    fun setTtsPitch(value: Float) {
+        val safe = value.coerceIn(.5f, 1.5f)
+        textToSpeech?.setPitch(safe)
+        mutableState.update { it.copy(ttsPitch = safe) }
+        viewModelScope.launch { settingsRepository.setPdfTtsPitch(safe) }
+    }
+
+    fun exportReaderData(uri: Uri) {
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    val bookmarks = readingDao.getBookmarks(bookId)
+                    val highlights = readingDao.getHighlights(bookId)
+                    val notes = readingDao.getNotes(bookId)
+                    val markdown = buildString {
+                        appendLine("# ${mutableState.value.title}")
+                        appendLine()
+                        appendLine("## Marcadores")
+                        if (bookmarks.isEmpty()) appendLine("_Sin marcadores._")
+                        bookmarks.forEach { bookmark ->
+                            val locator = PdfBookmarkCodec.decode(bookmark.locatorJson)
+                            appendLine("- ${bookmark.label ?: "Marcador"} — página ${(locator?.page ?: 0) + 1}")
+                        }
+                        appendLine()
+                        appendLine("## Resaltados")
+                        if (highlights.isEmpty()) appendLine("_Sin resaltados._")
+                        highlights.forEach { highlight -> appendLine("- > ${highlight.selectedText.replace("\n", " ")}") }
+                        appendLine()
+                        appendLine("## Notas")
+                        if (notes.isEmpty()) appendLine("_Sin notas._")
+                        notes.forEach { note -> appendLine("- ${note.content.replace("\n", " ")}") }
+                    }
+                    application.contentResolver.openOutputStream(uri, "wt")?.bufferedWriter()?.use { it.write(markdown) }
+                        ?: error("No se pudo abrir el destino")
+                }
+            }
+            mutableState.update { it.copy(notice = if (result.isSuccess) "Datos exportados correctamente." else "No se pudieron exportar los datos.") }
+        }
+    }
+
+    fun clearNotice() = mutableState.update { it.copy(notice = null) }
+
+    private fun initializeTts() {
+        if (textToSpeech != null) return
+        playWhenTtsReady = true
+        mutableState.update { it.copy(ttsMessage = "Preparando lectura en voz alta…") }
+        textToSpeech = TextToSpeech(application.applicationContext) { status ->
+            viewModelScope.launch {
+                if (status == TextToSpeech.SUCCESS) {
+                    textToSpeech?.setSpeechRate(mutableState.value.ttsRate)
+                    textToSpeech?.setPitch(mutableState.value.ttsPitch)
+                    textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) = Unit
+                        override fun onDone(utteranceId: String?) {
+                            viewModelScope.launch { if (!cleared && mutableState.value.ttsPlaying) nextTtsFragment() }
+                        }
+                        @Deprecated("Platform callback")
+                        override fun onError(utteranceId: String?) {
+                            mutableState.update { it.copy(ttsPlaying = false, ttsMessage = "No se pudo reproducir este fragmento.") }
+                        }
+                    })
+                    mutableState.update { it.copy(ttsReady = true, ttsMessage = null) }
+                    if (playWhenTtsReady) {
+                        playWhenTtsReady = false
+                        loadSpeechPage(mutableState.value.currentPage)
+                    }
+                } else {
+                    textToSpeech?.shutdown()
+                    textToSpeech = null
+                    mutableState.update { it.copy(ttsMessage = "No hay un motor Text To Speech disponible.") }
+                }
+            }
+        }
+    }
+
+    private fun pauseTts() {
+        textToSpeech?.stop()
+        mutableState.update { it.copy(ttsPlaying = false, ttsPaused = true, ttsMessage = "Lectura en pausa") }
+    }
+
+    private fun loadSpeechPage(page: Int, startAtEnd: Boolean = false) {
+        val state = mutableState.value
+        if (page !in 0 until state.pageCount) {
+            stopTts()
+            return
+        }
+        viewModelScope.launch {
+            mutableState.update { it.copy(ttsMessage = "Extrayendo texto de la página ${page + 1}…") }
+            val text = runCatching { engine.extractPageText(page) }.getOrNull()
+            val fragments = text?.let(::splitPdfSpeechText).orEmpty()
+            if (fragments.isEmpty()) {
+                mutableState.update { it.copy(ttsPlaying = false, ttsPaused = false, ttsMessage = "Esta página no contiene texto accesible. Puede ser un PDF escaneado.") }
+                return@launch
+            }
+            speechPage = page
+            speechFragments = fragments
+            speechFragmentIndex = if (startAtEnd) fragments.lastIndex else 0
+            goToPage(page)
+            speakCurrentFragment()
+        }
+    }
+
+    private fun speakCurrentFragment() {
+        val engine = textToSpeech ?: return
+        val fragment = speechFragments.getOrNull(speechFragmentIndex) ?: return
+        engine.setSpeechRate(mutableState.value.ttsRate)
+        engine.setPitch(mutableState.value.ttsPitch)
+        val result = engine.speak(fragment, TextToSpeech.QUEUE_FLUSH, null, "pdf-$speechPage-$speechFragmentIndex")
+        mutableState.update {
+            it.copy(
+                ttsPlaying = result == TextToSpeech.SUCCESS,
+                ttsPaused = false,
+                ttsPage = speechPage,
+                ttsFragment = speechFragmentIndex,
+                ttsFragmentCount = speechFragments.size,
+                ttsMessage = if (result == TextToSpeech.SUCCESS) null else "No se pudo iniciar la lectura.",
+            )
+        }
+    }
 
     fun search(query: String) {
         mutableState.update { it.copy(searchQuery = query, searchResults = emptyList()) }
@@ -273,6 +530,11 @@ class PdfReaderViewModel(
                 cropMargins = state.cropMargins,
                 orientation = state.orientation.name,
                 rotation = state.rotation,
+                pdfTheme = state.readerTheme.name,
+                cropLeft = state.manualCrop.left,
+                cropTop = state.manualCrop.top,
+                cropRight = state.manualCrop.right,
+                cropBottom = state.manualCrop.bottom,
             )
         }
     }
@@ -283,16 +545,29 @@ class PdfReaderViewModel(
     }
 
     override fun onCleared() {
+        cleared = true
+        val activeJobs = (renderJobs.values + thumbnailJobs.values + listOfNotNull(searchJob)).distinct()
+        renderJobs.clear()
+        thumbnailJobs.clear()
+        searchJob = null
+        activeJobs.forEach(Job::cancel)
+        mutableState.update { it.copy(pages = emptyMap(), thumbnails = emptyMap()) }
+        textToSpeech?.stop()
+        textToSpeech?.shutdown()
+        textToSpeech = null
         endSession()
         saveProgress()
-        applicationScope.launch { engine.closeSafely() }
+        applicationScope.launch {
+            activeJobs.joinAll()
+            engine.closeSafely()
+        }
     }
 
     class Factory(private val application: Application, private val bookId: Long) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             val container = (application as LectorApplication).container
-            return PdfReaderViewModel(bookId, container.createPdfEngine(), container.bookDao, container.readingDao, container.settingsRepository, container.applicationScope) as T
+            return PdfReaderViewModel(application, bookId, container.createPdfEngine(), container.bookDao, container.readingDao, container.settingsRepository, container.applicationScope) as T
         }
     }
 }
@@ -302,5 +577,6 @@ private inline fun <reified T : Enum<T>> String?.toEnumOrDefault(default: T): T 
 
 private fun String?.toPdfDirection(): PdfPageDirection = when (this) {
     "HORIZONTAL", PdfPageDirection.PAGED_HORIZONTAL.name -> PdfPageDirection.PAGED_HORIZONTAL
+    PdfPageDirection.SPREAD.name -> PdfPageDirection.SPREAD
     else -> PdfPageDirection.CONTINUOUS
 }
