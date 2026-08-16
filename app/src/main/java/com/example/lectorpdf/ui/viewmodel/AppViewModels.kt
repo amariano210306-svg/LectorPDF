@@ -1,6 +1,7 @@
 package com.example.lectorpdf.ui.viewmodel
 
 import android.app.Application
+import androidx.core.net.toUri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -16,6 +17,9 @@ import com.example.lectorpdf.data.local.dao.ReadingDao
 import com.example.lectorpdf.data.preferences.AppSettings
 import com.example.lectorpdf.data.preferences.SettingsRepository
 import com.example.lectorpdf.data.repository.LibraryRepository
+import com.example.lectorpdf.data.scanner.DocumentScanner
+import com.example.lectorpdf.data.scanner.StorageScanProgress
+import com.example.lectorpdf.data.scanner.StorageScanResult
 import com.example.lectorpdf.domain.model.AppTheme
 import com.example.lectorpdf.domain.model.LibraryBook
 import com.example.lectorpdf.domain.model.LibraryFilter
@@ -28,35 +32,82 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Calendar
 
-data class MainUiState(val loading: Boolean = true, val settings: AppSettings = AppSettings())
+data class MainUiState(
+    val loading: Boolean = true,
+    val settings: AppSettings = AppSettings(),
+    val message: String? = null,
+)
 
-class MainViewModel(private val settingsRepository: SettingsRepository) : ViewModel() {
-    val uiState = settingsRepository.settings
-        .map { MainUiState(loading = false, settings = it) }
+class MainViewModel(
+    private val application: Application,
+    private val settingsRepository: SettingsRepository,
+    private val repository: LibraryRepository,
+    private val scanner: DocumentScanner,
+) : ViewModel() {
+    private val message = MutableStateFlow<String?>(null)
+    val uiState = combine(settingsRepository.settings, message) { settings, currentMessage ->
+        MainUiState(loading = false, settings = settings, message = currentMessage)
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
 
     fun completeOnboarding() = viewModelScope.launch { settingsRepository.completeOnboarding() }
+    fun dismissMessage() { message.value = null }
+
+    suspend fun prepareAutoResume(): Long? {
+        val settings = settingsRepository.settings.first()
+        if (!settings.resumeLastReading) return null
+        val bookId = settings.lastOpenedBookId ?: repository.findLastOpenedPdf()?.id?.also {
+            settingsRepository.setLastOpenedBook(it)
+        } ?: return null
+        val book = repository.findBook(bookId)
+        val valid = book != null && book.format == "PDF" && book.isAvailable && withContext(Dispatchers.IO) {
+            runCatching { application.contentResolver.openFileDescriptor(book.uri.toUri(), "r")?.use { true } ?: false }.getOrDefault(false)
+        }
+        if (!valid) {
+            book?.let { repository.setAvailable(it.id, false) }
+            settingsRepository.clearLastOpenedBook()
+            message.value = "El último documento ya no está disponible."
+            return null
+        }
+        return bookId
+    }
+
+    init {
+        viewModelScope.launch {
+            val settings = settingsRepository.settings.first()
+            if (!settings.initialStorageScanCompleted) {
+                if (repository.countAvailableBooks() == 0) scanner.scanAll()
+                settingsRepository.setInitialStorageScanCompleted(true)
+            }
+        }
+    }
 }
 
 data class HomeUiState(
     val recent: List<LibraryBook> = emptyList(),
     val totalBooks: Int = 0,
     val collections: List<CollectionSummary> = emptyList(),
+    val lastOpenedBookId: Long? = null,
 ) {
-    val continueReading: LibraryBook? get() = recent.firstOrNull()
+    val continueReading: LibraryBook? get() =
+        lastOpenedBookId?.let { id -> recent.firstOrNull { it.id == id } } ?: recent.firstOrNull()
 }
 
-class HomeViewModel(repository: LibraryRepository) : ViewModel() {
+class HomeViewModel(repository: LibraryRepository, settingsRepository: SettingsRepository) : ViewModel() {
     val uiState = combine(
         repository.observeRecent(),
         repository.observeBookCount(),
         repository.collectionDao.observeCollections(),
-    ) { recent, count, collections -> HomeUiState(recent, count, collections) }
+        settingsRepository.settings,
+    ) { recent, count, collections, settings -> HomeUiState(recent, count, collections, settings.lastOpenedBookId) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())
 }
 
@@ -94,16 +145,45 @@ class LibraryViewModel(
     fun setFavorite(book: LibraryBook, favorite: Boolean) = viewModelScope.launch { repository.setFavorite(book.id, favorite) }
 }
 
-data class ImportUiState(val importing: Boolean = false, val result: ImportResult? = null)
+data class ImportUiState(
+    val importing: Boolean = false,
+    val scanning: Boolean = false,
+    val progress: StorageScanProgress? = null,
+    val result: ImportResult? = null,
+    val scanResult: StorageScanResult? = null,
+)
 
-class FilesViewModel(private val importer: DocumentImporter) : ViewModel() {
+class FilesViewModel(
+    private val importer: DocumentImporter,
+    private val scanner: DocumentScanner,
+    private val settingsRepository: SettingsRepository,
+) : ViewModel() {
     val uiState = MutableStateFlow(ImportUiState())
 
     fun import(uris: List<android.net.Uri>) {
-        if (uris.isEmpty() || uiState.value.importing) return
+        if (uris.isEmpty() || uiState.value.importing || uiState.value.scanning) return
         viewModelScope.launch {
-            uiState.value = ImportUiState(importing = true)
-            uiState.value = ImportUiState(result = importer.import(uris))
+            uiState.value = uiState.value.copy(importing = true, result = null)
+            uiState.value = uiState.value.copy(importing = false, result = importer.import(uris))
+        }
+    }
+
+    fun scanDevice() {
+        if (uiState.value.importing || uiState.value.scanning) return
+        viewModelScope.launch {
+            uiState.value = uiState.value.copy(scanning = true, scanResult = null, progress = StorageScanProgress(source = "Preparando escaneo"))
+            val result = scanner.scanAll { progress -> uiState.value = uiState.value.copy(progress = progress) }
+            uiState.value = uiState.value.copy(scanning = false, scanResult = result)
+        }
+    }
+
+    fun addFolder(uri: android.net.Uri) {
+        if (uiState.value.importing || uiState.value.scanning) return
+        viewModelScope.launch {
+            settingsRepository.addScanFolder(uri.toString())
+            uiState.value = uiState.value.copy(scanning = true, scanResult = null, progress = StorageScanProgress(source = "Carpeta seleccionada"))
+            val result = scanner.scanTree(uri) { progress -> uiState.value = uiState.value.copy(progress = progress) }
+            uiState.value = uiState.value.copy(scanning = false, scanResult = result)
         }
     }
 }
@@ -115,6 +195,7 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
     fun setAnimations(value: Boolean) = viewModelScope.launch { repository.setAnimationsEnabled(value) }
     fun setKeepScreenOn(value: Boolean) = viewModelScope.launch { repository.setKeepScreenOn(value) }
     fun setVolumeButtons(value: Boolean) = viewModelScope.launch { repository.setVolumeButtons(value) }
+    fun setResumeLastReading(value: Boolean) = viewModelScope.launch { repository.setResumeLastReading(value) }
 }
 
 class StatsViewModel(readingDao: ReadingDao) : ViewModel() {
@@ -162,10 +243,10 @@ class BookDetailsViewModel(
 
 object AppViewModelProvider {
     val Factory = viewModelFactory {
-        initializer { MainViewModel(app().container.settingsRepository) }
-        initializer { HomeViewModel(app().container.libraryRepository) }
+        initializer { MainViewModel(app(), app().container.settingsRepository, app().container.libraryRepository, app().container.documentScanner) }
+        initializer { HomeViewModel(app().container.libraryRepository, app().container.settingsRepository) }
         initializer { LibraryViewModel(app().container.libraryRepository, app().container.settingsRepository) }
-        initializer { FilesViewModel(app().container.documentImporter) }
+        initializer { FilesViewModel(app().container.documentImporter, app().container.documentScanner, app().container.settingsRepository) }
         initializer { SettingsViewModel(app().container.settingsRepository) }
         initializer { StatsViewModel(app().container.readingDao) }
         initializer { BookDetailsViewModel(app().container.libraryRepository, createSavedStateHandle()) }

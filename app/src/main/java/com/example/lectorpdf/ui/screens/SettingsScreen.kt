@@ -35,7 +35,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     LazyColumn(
         Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 104.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         item {
@@ -60,6 +60,7 @@ fun SettingsScreen(viewModel: SettingsViewModel) {
         item { SectionTitle("Lectura") }
         item { SettingSwitch(Icons.Outlined.ScreenLockPortrait, "Mantener pantalla activa", "Evita que la pantalla se apague mientras lees.", settings.keepScreenOn, viewModel::setKeepScreenOn) }
         item { SettingSwitch(Icons.AutoMirrored.Outlined.VolumeUp, "Botones de volumen", "Permite usarlos para avanzar o retroceder páginas.", settings.volumeButtonsTurnPages, viewModel::setVolumeButtons) }
+        item { SettingSwitch(Icons.Outlined.ScreenLockPortrait, "Reanudar última lectura", "Abre el último PDF disponible al iniciar la aplicación.", settings.resumeLastReading, viewModel::setResumeLastReading) }
         item {
             Column(Modifier.padding(vertical = 18.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {

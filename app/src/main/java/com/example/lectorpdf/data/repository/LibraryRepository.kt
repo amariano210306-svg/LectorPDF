@@ -49,6 +49,13 @@ class LibraryRepository(
     fun observeBookCount(): Flow<Int> = bookDao.observeBookCount()
 
     suspend fun importBook(book: BookEntity): Pair<Long, Boolean> = bookDao.insertWithProgress(book)
+    suspend fun syncBook(book: BookEntity): Pair<Long, Boolean> = bookDao.upsertScanned(book)
+    suspend fun markMissingFromScan(sourceType: String, scanRootUri: String?, scanId: Long): Int =
+        bookDao.markMissingFromScan(sourceType, scanRootUri, scanId)
+    suspend fun countAvailableBooks(): Int = bookDao.countAvailableBooks()
+    suspend fun findBook(bookId: Long): BookEntity? = bookDao.findById(bookId)
+    suspend fun findLastOpenedPdf(): BookEntity? = bookDao.findLastOpenedPdf()
+    suspend fun setAvailable(bookId: Long, available: Boolean) = bookDao.setAvailable(bookId, available)
     suspend fun setFavorite(bookId: Long, favorite: Boolean) = bookDao.setFavorite(bookId, favorite)
     suspend fun rename(bookId: Long, title: String) = bookDao.renameInLibrary(bookId, title.trim())
     suspend fun removeFromLibrary(bookId: Long) = bookDao.removeFromLibrary(bookId)

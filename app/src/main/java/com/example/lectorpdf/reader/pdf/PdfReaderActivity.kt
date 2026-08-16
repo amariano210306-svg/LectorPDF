@@ -13,6 +13,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -44,13 +45,24 @@ class PdfReaderActivity : ComponentActivity() {
             val readerState by viewModel.uiState.collectAsStateWithLifecycle()
             LectorPDFTheme(settings.theme, settings.dynamicColor) {
                 LaunchedEffect(readerState.loading) { if (!readerState.loading && readerState.error == null) viewModel.beginSession() }
-                DisposableEffect(readerState.brightness, readerState.focusMode, settings.keepScreenOn) {
-                    applyReaderWindow(readerState.brightness, readerState.focusMode, settings.keepScreenOn)
+                LaunchedEffect(readerState.loading, readerState.orientation) {
+                    if (!readerState.loading) setReaderOrientation(readerState.orientation)
+                }
+                DisposableEffect(readerState.brightness, readerState.focusMode, readerState.controlsVisible, settings.keepScreenOn) {
+                    applyReaderWindow(
+                        readerState.brightness,
+                        readerState.controlsVisible && !readerState.focusMode,
+                        settings.keepScreenOn,
+                    )
                     onDispose { }
                 }
                 PdfReaderScreen(
                     state = readerState,
                     viewModel = viewModel,
+                    keepScreenOn = settings.keepScreenOn,
+                    volumeButtonsTurnPages = settings.volumeButtonsTurnPages,
+                    onSetKeepScreenOn = { value -> lifecycleScope.launch { (application as LectorApplication).container.settingsRepository.setKeepScreenOn(value) } },
+                    onSetVolumeButtons = { value -> lifecycleScope.launch { (application as LectorApplication).container.settingsRepository.setVolumeButtons(value) } },
                     onBack = ::finish,
                     onOrientation = ::setReaderOrientation,
                 )
@@ -69,6 +81,11 @@ class PdfReaderActivity : ComponentActivity() {
         super.onStop()
     }
 
+    override fun onPause() {
+        viewModel.flushProgress()
+        super.onPause()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
         if (volumeButtonsTurnPages) {
             when (keyCode) {
@@ -79,12 +96,13 @@ class PdfReaderActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
-    private fun applyReaderWindow(brightness: Float, focusMode: Boolean, keepScreenOn: Boolean) {
+    private fun applyReaderWindow(brightness: Float, systemBarsVisible: Boolean, keepScreenOn: Boolean) {
         window.attributes = window.attributes.apply { screenBrightness = brightness }
         if (keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val controller = WindowCompat.getInsetsController(window, window.decorView)
-        if (focusMode) controller.hide(WindowInsetsCompat.Type.systemBars()) else controller.show(WindowInsetsCompat.Type.systemBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        if (systemBarsVisible) controller.show(WindowInsetsCompat.Type.systemBars()) else controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 
     private fun setReaderOrientation(mode: ReaderOrientation) {

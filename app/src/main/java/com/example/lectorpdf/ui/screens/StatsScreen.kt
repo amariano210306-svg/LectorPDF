@@ -24,7 +24,7 @@ import com.example.lectorpdf.ui.viewmodel.StatsViewModel
 @Composable
 fun StatsScreen(viewModel: StatsViewModel) {
     val summary by viewModel.summary.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 104.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+    Column(Modifier.fillMaxSize().padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
         Text("Estadísticas", style = MaterialTheme.typography.headlineLarge)
         Text("Tiempo de lectura registrado en este dispositivo.", color = MaterialTheme.colorScheme.onSurfaceVariant)
         StatCard("Hoy", formatDuration(summary.todayMillis), Icons.Outlined.Schedule)

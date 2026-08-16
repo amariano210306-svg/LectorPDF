@@ -77,6 +77,7 @@ class DocumentImporter(
             format = format.name,
             mimeType = mimeType.ifBlank { if (format == BookFormat.PDF) "application/pdf" else "application/epub+zip" },
             sizeBytes = values?.second ?: 0,
+            sourceType = "SAF_FILE",
         )
     }
 

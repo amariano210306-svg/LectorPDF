@@ -94,7 +94,7 @@ fun LibraryScreen(
         } else if (state.viewMode == LibraryViewMode.GRID) {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(150.dp),
-                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 104.dp),
+                contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 24.dp),
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalArrangement = Arrangement.spacedBy(22.dp),
             ) {
@@ -103,7 +103,7 @@ fun LibraryScreen(
                 }
             }
         } else {
-            LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 104.dp)) {
+            LazyColumn(contentPadding = PaddingValues(start = 20.dp, end = 20.dp, bottom = 24.dp)) {
                 listItems(state.books, key = { it.id }) { book ->
                     BookListRow(book, { onBookClick(book.id) }, { viewModel.setFavorite(book, it) })
                 }

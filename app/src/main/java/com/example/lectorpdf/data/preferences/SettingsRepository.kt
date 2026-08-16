@@ -3,6 +3,8 @@ package com.example.lectorpdf.data.preferences
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.lectorpdf.domain.model.AppTheme
@@ -24,6 +26,10 @@ data class AppSettings(
     val librarySort: LibrarySort = LibrarySort.DATE_ADDED,
     val keepScreenOn: Boolean = true,
     val volumeButtonsTurnPages: Boolean = false,
+    val initialStorageScanCompleted: Boolean = false,
+    val scanFolderUris: Set<String> = emptySet(),
+    val resumeLastReading: Boolean = true,
+    val lastOpenedBookId: Long? = null,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -36,6 +42,10 @@ class SettingsRepository(private val context: Context) {
         val librarySort = stringPreferencesKey("library_sort")
         val keepScreenOn = booleanPreferencesKey("keep_screen_on")
         val volumeButtons = booleanPreferencesKey("volume_buttons_turn_pages")
+        val initialStorageScanCompleted = booleanPreferencesKey("initial_storage_scan_completed")
+        val scanFolderUris = stringSetPreferencesKey("scan_folder_uris")
+        val resumeLastReading = booleanPreferencesKey("resume_last_reading")
+        val lastOpenedBookId = longPreferencesKey("last_opened_book_id")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data
@@ -50,6 +60,10 @@ class SettingsRepository(private val context: Context) {
                 librarySort = preferences[Keys.librarySort].toEnumOrDefault(LibrarySort.DATE_ADDED),
                 keepScreenOn = preferences[Keys.keepScreenOn] ?: true,
                 volumeButtonsTurnPages = preferences[Keys.volumeButtons] ?: false,
+                initialStorageScanCompleted = preferences[Keys.initialStorageScanCompleted] ?: false,
+                scanFolderUris = preferences[Keys.scanFolderUris] ?: emptySet(),
+                resumeLastReading = preferences[Keys.resumeLastReading] ?: true,
+                lastOpenedBookId = preferences[Keys.lastOpenedBookId],
             )
         }
 
@@ -61,6 +75,17 @@ class SettingsRepository(private val context: Context) {
     suspend fun setLibrarySort(value: LibrarySort) = set(Keys.librarySort, value.name)
     suspend fun setKeepScreenOn(value: Boolean) = set(Keys.keepScreenOn, value)
     suspend fun setVolumeButtons(value: Boolean) = set(Keys.volumeButtons, value)
+    suspend fun setInitialStorageScanCompleted(value: Boolean) = set(Keys.initialStorageScanCompleted, value)
+    suspend fun addScanFolder(uri: String) {
+        context.settingsDataStore.edit { preferences ->
+            preferences[Keys.scanFolderUris] = (preferences[Keys.scanFolderUris] ?: emptySet()) + uri
+        }
+    }
+    suspend fun setResumeLastReading(value: Boolean) = set(Keys.resumeLastReading, value)
+    suspend fun setLastOpenedBook(bookId: Long) = set(Keys.lastOpenedBookId, bookId)
+    suspend fun clearLastOpenedBook() {
+        context.settingsDataStore.edit { it.remove(Keys.lastOpenedBookId) }
+    }
 
     private suspend fun <T> set(key: androidx.datastore.preferences.core.Preferences.Key<T>, value: T) {
         context.settingsDataStore.edit { it[key] = value }
