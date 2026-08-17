@@ -6,12 +6,15 @@ import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Matrix
+import android.graphics.Point
 import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
+import android.graphics.pdf.models.selection.SelectionBoundary
 import android.net.Uri
 import android.os.Build
 import android.util.Log
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.get
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -22,9 +25,17 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-enum class PdfFitMode { WIDTH, PAGE }
+enum class PdfFitMode { WIDTH, PAGE, CONTENT }
 
 data class PdfSearchResult(val pageIndex: Int, val matchCount: Int, val snippet: String? = null)
+data class PdfPageInfo(val width: Float, val height: Float, val crop: PdfNormalizedRect)
+data class PdfTextSelection(
+    val pageIndex: Int,
+    val text: String,
+    val bounds: List<PdfRect>,
+    val start: PdfPoint,
+    val stop: PdfPoint,
+)
 
 class PdfDocumentEngine(private val context: Context) {
     private var renderer: PdfRenderer? = null
@@ -64,7 +75,7 @@ class PdfDocumentEngine(private val context: Context) {
         zoom: Float,
         rotation: Int,
         fitMode: PdfFitMode,
-        cropMargins: Boolean,
+        cropMode: PdfCropMode,
         manualCrop: PdfCropInsets = PdfCropInsets(),
         thumbnail: Boolean = false,
     ): Bitmap = withContext(Dispatchers.IO) {
@@ -72,7 +83,7 @@ class PdfDocumentEngine(private val context: Context) {
         val widthBucket = if (thumbnail) 176 else ((viewportWidth * zoom).roundToInt() / 32 * 32).coerceIn(320, MAX_BITMAP_DIMENSION.toInt())
         val heightBucket = if (thumbnail) 248 else ((viewportHeight * zoom).roundToInt() / 32 * 32).coerceIn(320, MAX_BITMAP_DIMENSION.toInt())
         val safeManualCrop = manualCrop.normalized()
-        val key = "$pageIndex-$widthBucket-$heightBucket-${rotation.normalizedRotation()}-$fitMode-$cropMargins-$safeManualCrop-$thumbnail"
+        val key = "$pageIndex-$widthBucket-$heightBucket-${rotation.normalizedRotation()}-$fitMode-$cropMode-$safeManualCrop-$thumbnail"
         mutex.withLock {
             lifecycle.requireOpen()
             currentCoroutineContext().ensureActive()
@@ -82,7 +93,7 @@ class PdfDocumentEngine(private val context: Context) {
                 targetHeight = heightBucket,
                 rotation = rotation.normalizedRotation(),
                 fitMode = fitMode,
-                cropMargins = cropMargins,
+                cropMode = cropMode,
                 manualCrop = safeManualCrop,
                 thumbnail = thumbnail,
             ).also { bitmap ->
@@ -128,38 +139,76 @@ class PdfDocumentEngine(private val context: Context) {
         }
     }
 
+    suspend fun pageInfo(
+        pageIndex: Int,
+        fitMode: PdfFitMode,
+        cropMode: PdfCropMode,
+        manualCrop: PdfCropInsets,
+    ): PdfPageInfo = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            lifecycle.requireOpen()
+            val activeRenderer = checkNotNull(renderer)
+            require(pageIndex in 0 until activeRenderer.pageCount)
+            activeRenderer.openPage(pageIndex).use { page ->
+                val crop = resolveCropLocked(pageIndex, page, fitMode, cropMode, manualCrop)
+                PdfPageInfo(page.width.toFloat(), page.height.toFloat(), crop)
+            }
+        }
+    }
+
+    suspend fun selectText(pageIndex: Int, start: PdfPoint, stop: PdfPoint): PdfTextSelection? = withContext(Dispatchers.IO) {
+        if (Build.VERSION.SDK_INT < 35) return@withContext null
+        mutex.withLock {
+            lifecycle.requireOpen()
+            selectTextApi35(pageIndex, start, stop)
+        }
+    }
+
+    @androidx.annotation.RequiresApi(35)
+    private fun selectTextApi35(pageIndex: Int, start: PdfPoint, stop: PdfPoint): PdfTextSelection? {
+        val activeRenderer = checkNotNull(renderer)
+        if (pageIndex !in 0 until activeRenderer.pageCount) return null
+        return activeRenderer.openPage(pageIndex).use { page ->
+            val selection = page.selectContent(
+                SelectionBoundary(Point(start.x.roundToInt(), start.y.roundToInt())),
+                SelectionBoundary(Point(stop.x.roundToInt(), stop.y.roundToInt())),
+            ) ?: return@use null
+            val contents = selection.selectedTextContents
+            val text = contents.joinToString("\n") { it.text }.trim()
+            val bounds = contents.flatMap { content ->
+                content.bounds.map { PdfRect(it.left, it.top, it.right, it.bottom) }
+            }
+            if (text.isBlank() || bounds.isEmpty()) null else PdfTextSelection(
+                pageIndex = pageIndex,
+                text = text,
+                bounds = bounds,
+                start = selection.start.point?.let { PdfPoint(it.x.toFloat(), it.y.toFloat()) } ?: start,
+                stop = selection.stop.point?.let { PdfPoint(it.x.toFloat(), it.y.toFloat()) } ?: stop,
+            )
+        }
+    }
+
     private fun renderLocked(
         pageIndex: Int,
         targetWidth: Int,
         targetHeight: Int,
         rotation: Int,
         fitMode: PdfFitMode,
-        cropMargins: Boolean,
+        cropMode: PdfCropMode,
         manualCrop: PdfCropInsets,
         thumbnail: Boolean,
     ): Bitmap {
         val activeRenderer = checkNotNull(renderer) { "El PDF no está abierto" }
         require(pageIndex in 0 until activeRenderer.pageCount)
         return activeRenderer.openPage(pageIndex).use { page ->
-            val automaticCrop = if (cropMargins && !thumbnail) {
-                marginCache.getOrPut(pageIndex) { detectContentBounds(page) }
-            } else {
-                FULL_PAGE
-            }
-            val crop = if (!thumbnail && !manualCrop.isEmpty) {
-                RectF(
-                    (automaticCrop.left + manualCrop.left).coerceAtMost(.46f),
-                    (automaticCrop.top + manualCrop.top).coerceAtMost(.46f),
-                    (automaticCrop.right - manualCrop.right).coerceAtLeast(.54f),
-                    (automaticCrop.bottom - manualCrop.bottom).coerceAtLeast(.54f),
-                )
-            } else automaticCrop
+            val cropNormalized = if (thumbnail) PdfNormalizedRect() else resolveCropLocked(pageIndex, page, fitMode, cropMode, manualCrop)
+            val crop = RectF(cropNormalized.left, cropNormalized.top, cropNormalized.right, cropNormalized.bottom)
             val cropWidth = (page.width * crop.width()).coerceAtLeast(1f)
             val cropHeight = (page.height * crop.height()).coerceAtLeast(1f)
             val rotatedWidth = if (rotation == 90 || rotation == 270) cropHeight else cropWidth
             val rotatedHeight = if (rotation == 90 || rotation == 270) cropWidth else cropHeight
             val rawScale = when (fitMode) {
-                PdfFitMode.WIDTH -> targetWidth / rotatedWidth
+                PdfFitMode.WIDTH, PdfFitMode.CONTENT -> targetWidth / rotatedWidth
                 PdfFitMode.PAGE -> min(targetWidth / rotatedWidth, targetHeight / rotatedHeight)
             }
             val dimensionLimit = min(MAX_BITMAP_DIMENSION / rotatedWidth, MAX_BITMAP_DIMENSION / rotatedHeight)
@@ -182,6 +231,28 @@ class PdfDocumentEngine(private val context: Context) {
         }
     }
 
+    private fun resolveCropLocked(
+        pageIndex: Int,
+        page: PdfRenderer.Page,
+        fitMode: PdfFitMode,
+        cropMode: PdfCropMode,
+        manualCrop: PdfCropInsets,
+    ): PdfNormalizedRect {
+        val effectiveMode = if (fitMode == PdfFitMode.CONTENT && cropMode == PdfCropMode.NONE) {
+            PdfCropMode.AUTOMATIC
+        } else cropMode
+        val automatic = if (effectiveMode == PdfCropMode.AUTOMATIC) {
+            marginCache.getOrPut(pageIndex) { detectContentBounds(page) }.let {
+                PdfNormalizedRect(it.left, it.top, it.right, it.bottom)
+            }
+        } else PdfNormalizedRect()
+        return when (effectiveMode) {
+            PdfCropMode.NONE -> PdfNormalizedRect()
+            PdfCropMode.AUTOMATIC -> automatic
+            PdfCropMode.MANUAL -> combineCrop(PdfNormalizedRect(), manualCrop)
+        }
+    }
+
     private fun detectContentBounds(page: PdfRenderer.Page): RectF {
         val scale = (MARGIN_SAMPLE_WIDTH.toFloat() / page.width).coerceAtMost(1f)
         val sample = createBitmap(
@@ -192,6 +263,15 @@ class PdfDocumentEngine(private val context: Context) {
         return try {
             sample.eraseColor(Color.WHITE)
             page.render(sample, null, Matrix().apply { setScale(scale, scale) }, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            val cornerInset = 3.coerceAtMost((minOf(sample.width, sample.height) - 1).coerceAtLeast(0))
+            val backgroundSamples = intArrayOf(
+                sample[cornerInset, cornerInset],
+                sample[(sample.width - 1 - cornerInset).coerceAtLeast(0), cornerInset],
+                sample[cornerInset, (sample.height - 1 - cornerInset).coerceAtLeast(0)],
+                sample[(sample.width - 1 - cornerInset).coerceAtLeast(0), (sample.height - 1 - cornerInset).coerceAtLeast(0)],
+            )
+            val background = averageColor(backgroundSamples)
+            if (backgroundSamples.any { colorDistance(it, background) > 58 }) return FULL_PAGE
             var minX = sample.width
             var minY = sample.height
             var maxX = -1
@@ -203,7 +283,7 @@ class PdfDocumentEngine(private val context: Context) {
                 var x = 0
                 while (x < sample.width) {
                     val color = pixels[x]
-                    if (Color.red(color) < WHITE_THRESHOLD || Color.green(color) < WHITE_THRESHOLD || Color.blue(color) < WHITE_THRESHOLD) {
+                    if (colorDistance(color, background) >= CONTENT_DISTANCE_THRESHOLD) {
                         minX = min(minX, x)
                         minY = min(minY, y)
                         maxX = maxOf(maxX, x)
@@ -216,12 +296,13 @@ class PdfDocumentEngine(private val context: Context) {
             if (maxX <= minX || maxY <= minY) return FULL_PAGE
             val paddingX = (sample.width * .018f).roundToInt()
             val paddingY = (sample.height * .012f).roundToInt()
-            RectF(
+            val detected = conservativeDetectedCrop(
                 ((minX - paddingX).coerceAtLeast(0) / sample.width.toFloat()).coerceAtMost(.24f),
                 ((minY - paddingY).coerceAtLeast(0) / sample.height.toFloat()).coerceAtMost(.24f),
                 ((maxX + paddingX).coerceAtMost(sample.width - 1) / sample.width.toFloat()).coerceAtLeast(.76f),
                 ((maxY + paddingY).coerceAtMost(sample.height - 1) / sample.height.toFloat()).coerceAtLeast(.76f),
             )
+            RectF(detected.left, detected.top, detected.right, detected.bottom)
         } finally {
             sample.recycle()
         }
@@ -259,7 +340,7 @@ class PdfDocumentEngine(private val context: Context) {
     private companion object {
         val FULL_PAGE = RectF(0f, 0f, 1f, 1f)
         const val MARGIN_SAMPLE_WIDTH = 240
-        const val WHITE_THRESHOLD = 246
+        const val CONTENT_DISTANCE_THRESHOLD = 26
         const val MAX_BITMAP_DIMENSION = 4096f
         const val MAX_BITMAP_PIXELS = 12_000_000f
         const val TAG = "PdfDocumentEngine"
@@ -267,3 +348,15 @@ class PdfDocumentEngine(private val context: Context) {
 }
 
 private fun Int.normalizedRotation(): Int = ((this % 360) + 360) % 360
+
+private fun averageColor(colors: IntArray): Int = Color.rgb(
+    colors.map(Color::red).average().roundToInt(),
+    colors.map(Color::green).average().roundToInt(),
+    colors.map(Color::blue).average().roundToInt(),
+)
+
+private fun colorDistance(first: Int, second: Int): Int = maxOf(
+    kotlin.math.abs(Color.red(first) - Color.red(second)),
+    kotlin.math.abs(Color.green(first) - Color.green(second)),
+    kotlin.math.abs(Color.blue(first) - Color.blue(second)),
+)

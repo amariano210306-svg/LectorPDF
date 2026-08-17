@@ -15,6 +15,8 @@ import com.example.lectorpdf.data.local.dao.BookDao
 import com.example.lectorpdf.data.local.dao.ReadingDao
 import com.example.lectorpdf.data.local.entity.ReadingSessionEntity
 import com.example.lectorpdf.data.local.entity.BookmarkEntity
+import com.example.lectorpdf.data.local.entity.HighlightEntity
+import com.example.lectorpdf.data.local.entity.NoteEntity
 import com.example.lectorpdf.data.preferences.SettingsRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -47,15 +49,18 @@ data class PdfReaderUiState(
     val focusMode: Boolean = false,
     val brightness: Float = -1f,
     val pages: Map<Int, Bitmap> = emptyMap(),
+    val pageInfo: Map<Int, PdfPageInfo> = emptyMap(),
     val thumbnails: Map<Int, Bitmap> = emptyMap(),
     val searchQuery: String = "",
     val searchResults: List<PdfSearchResult> = emptyList(),
     val searching: Boolean = false,
     val pageOffsetFraction: Float = 0f,
-    val cropMargins: Boolean = false,
+    val cropMode: PdfCropMode = PdfCropMode.NONE,
     val manualCrop: PdfCropInsets = PdfCropInsets(),
     val readerTheme: PdfReaderTheme = PdfReaderTheme.DAY,
     val bookmarks: List<BookmarkEntity> = emptyList(),
+    val highlights: List<HighlightEntity> = emptyList(),
+    val notes: List<NoteEntity> = emptyList(),
     val orientation: ReaderOrientation = ReaderOrientation.AUTO,
     val navigationToken: Long = 0,
     val controlsInteractionToken: Long = 0,
@@ -69,6 +74,9 @@ data class PdfReaderUiState(
     val ttsFragmentCount: Int = 0,
     val ttsMessage: String? = null,
     val notice: String? = null,
+    val bookmarkPulseToken: Long = 0,
+    val selection: PdfTextSelection? = null,
+    val selecting: Boolean = false,
 ) {
     val searchSupported: Boolean get() = Build.VERSION.SDK_INT >= 35
     val ttsSupported: Boolean get() = Build.VERSION.SDK_INT >= 35
@@ -90,6 +98,7 @@ class PdfReaderViewModel(
     private var visiblePages: Set<Int> = emptySet()
     private var progressJob: Job? = null
     private var searchJob: Job? = null
+    private var selectionJob: Job? = null
     private var sessionStartedAt: Long? = null
     private var sessionStartProgress = 0f
     private var previousStatus = "UNREAD"
@@ -100,18 +109,34 @@ class PdfReaderViewModel(
     private var speechFragmentIndex = 0
     private var speechPage = 0
     private var playWhenTtsReady = false
+    private var brightnessRestored = false
 
     init {
         viewModelScope.launch {
             settingsRepository.settings.collect { settings ->
-                if (!mutableState.value.ttsPlaying) {
-                    mutableState.update { it.copy(ttsRate = settings.pdfTtsRate, ttsPitch = settings.pdfTtsPitch) }
+                mutableState.update {
+                    it.copy(
+                        ttsRate = if (it.ttsPlaying) it.ttsRate else settings.pdfTtsRate,
+                        ttsPitch = if (it.ttsPlaying) it.ttsPitch else settings.pdfTtsPitch,
+                        brightness = if (brightnessRestored) it.brightness else settings.pdfReaderBrightness,
+                    )
                 }
+                brightnessRestored = true
             }
         }
         viewModelScope.launch {
             readingDao.observeBookmarks(bookId).collect { bookmarks ->
                 mutableState.update { it.copy(bookmarks = bookmarks) }
+            }
+        }
+        viewModelScope.launch {
+            readingDao.observeHighlights(bookId).collect { highlights ->
+                mutableState.update { it.copy(highlights = highlights) }
+            }
+        }
+        viewModelScope.launch {
+            readingDao.observeNotes(bookId).collect { notes ->
+                mutableState.update { it.copy(notes = notes) }
             }
         }
         viewModelScope.launch {
@@ -132,7 +157,11 @@ class PdfReaderViewModel(
                         fitMode = progress?.fitMode.toEnumOrDefault(PdfFitMode.WIDTH),
                         direction = progress?.direction.toPdfDirection(),
                         pageOffsetFraction = (progress?.pageOffsetFraction ?: 0f).coerceIn(0f, 1f),
-                        cropMargins = progress?.cropMargins ?: false,
+                        cropMode = progress?.cropMode.toEnumOrDefault(
+                            if (progress?.cropMargins == true) PdfCropMode.AUTOMATIC
+                            else if (listOf(progress?.cropLeft, progress?.cropTop, progress?.cropRight, progress?.cropBottom).any { (it ?: 0f) > 0f }) PdfCropMode.MANUAL
+                            else PdfCropMode.NONE,
+                        ),
                         manualCrop = PdfCropInsets(
                             left = progress?.cropLeft ?: 0f,
                             top = progress?.cropTop ?: 0f,
@@ -168,9 +197,15 @@ class PdfReaderViewModel(
                     zoom = if (thumbnail) 1f else state.zoom,
                     rotation = state.rotation,
                     fitMode = if (thumbnail) PdfFitMode.PAGE else state.fitMode,
-                    cropMargins = state.cropMargins,
+                    cropMode = state.cropMode,
                     manualCrop = state.manualCrop,
                     thumbnail = thumbnail,
+                )
+                val info = if (thumbnail) null else engine.pageInfo(
+                    pageIndex = page,
+                    fitMode = state.fitMode,
+                    cropMode = state.cropMode,
+                    manualCrop = state.manualCrop,
                 )
                 coroutineContext.ensureActive()
                 mutableState.update { current ->
@@ -179,7 +214,10 @@ class PdfReaderViewModel(
                         current.copy(thumbnails = limited)
                     } else {
                         val relevant = visiblePages.isEmpty() || page in visiblePages
-                        if (relevant) current.copy(pages = current.pages + (page to bitmap)) else current
+                        if (relevant) current.copy(
+                            pages = current.pages + (page to bitmap),
+                            pageInfo = info?.let { current.pageInfo + (page to it) } ?: current.pageInfo,
+                        ) else current
                     }
                 }
             } catch (cancelled: CancellationException) {
@@ -204,7 +242,7 @@ class PdfReaderViewModel(
         if (retained == visiblePages) return
         visiblePages = retained
         renderJobs.filterKeys { it !in retained }.values.forEach(Job::cancel)
-        mutableState.update { it.copy(pages = it.pages.filterKeys(retained::contains)) }
+        mutableState.update { it.copy(pages = it.pages.filterKeys(retained::contains), pageInfo = it.pageInfo.filterKeys(retained::contains)) }
     }
 
     fun onViewportShapeChanged(landscape: Boolean) {
@@ -244,20 +282,172 @@ class PdfReaderViewModel(
     }
 
     fun rotate() { mutableState.update { it.copy(rotation = (it.rotation + 90) % 360, pages = emptyMap(), thumbnails = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
-    fun setFitMode(value: PdfFitMode) { mutableState.update { it.copy(fitMode = value, zoom = 1f, pages = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
+    fun setFitMode(value: PdfFitMode) {
+        mutableState.update { it.copy(fitMode = value, zoom = 1f, pages = emptyMap(), pageInfo = emptyMap(), navigationToken = it.navigationToken + 1, notice = value.labelForNotice()) }
+        scheduleProgressSave()
+    }
     fun setDirection(value: PdfPageDirection) { mutableState.update { it.copy(direction = value, zoom = 1f, pages = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
     fun setOrientation(value: ReaderOrientation) { mutableState.update { it.copy(orientation = value) }; scheduleProgressSave() }
-    fun setCropMargins(value: Boolean) { mutableState.update { it.copy(cropMargins = value, pages = emptyMap(), navigationToken = it.navigationToken + 1) }; scheduleProgressSave() }
+    fun setCropMode(value: PdfCropMode) {
+        mutableState.update {
+            it.copy(cropMode = value, pages = emptyMap(), pageInfo = emptyMap(), navigationToken = it.navigationToken + 1, notice = value.labelForNotice())
+        }
+        scheduleProgressSave()
+    }
     fun setManualCrop(value: PdfCropInsets) {
-        mutableState.update { it.copy(manualCrop = value.normalized(), pages = emptyMap(), navigationToken = it.navigationToken + 1) }
+        mutableState.update { it.copy(manualCrop = value.normalized(), pages = emptyMap(), pageInfo = emptyMap(), navigationToken = it.navigationToken + 1) }
         scheduleProgressSave()
     }
     fun setReaderTheme(value: PdfReaderTheme) {
-        mutableState.update { it.copy(readerTheme = value) }
+        mutableState.update { it.copy(readerTheme = value, notice = value.labelForNotice()) }
         scheduleProgressSave()
+    }
+    fun cycleReaderTheme() {
+        val next = when (mutableState.value.readerTheme) {
+            PdfReaderTheme.DAY -> PdfReaderTheme.SEPIA
+            PdfReaderTheme.SEPIA -> PdfReaderTheme.NIGHT
+            PdfReaderTheme.NIGHT -> PdfReaderTheme.CONSOLE
+            PdfReaderTheme.CONSOLE -> PdfReaderTheme.DAY
+        }
+        setReaderTheme(next)
     }
     fun setBrightness(value: Float) = mutableState.update {
         it.copy(brightness = if (value < 0f) -1f else value.coerceIn(.05f, 1f))
+    }
+
+    fun selectText(page: Int, point: PdfPoint) {
+        if (Build.VERSION.SDK_INT < 35) {
+            mutableState.update { it.copy(notice = "La selección de texto requiere Android 15 o superior") }
+            return
+        }
+        selectionJob?.cancel()
+        selectionJob = viewModelScope.launch {
+            mutableState.update { it.copy(selecting = true, selection = null) }
+            val selection = runCatching { engine.selectText(page, point, point) }.getOrNull()
+            mutableState.update {
+                it.copy(
+                    selecting = false,
+                    selection = selection,
+                    notice = if (selection == null) "Esta página no contiene texto seleccionable" else null,
+                )
+            }
+        }
+    }
+
+    fun updateSelection(start: PdfPoint? = null, stop: PdfPoint? = null) {
+        val current = mutableState.value.selection ?: return
+        selectionJob?.cancel()
+        selectionJob = viewModelScope.launch {
+            delay(45)
+            val updated = runCatching {
+                engine.selectText(current.pageIndex, start ?: current.start, stop ?: current.stop)
+            }.getOrNull()
+            if (updated != null) mutableState.update { it.copy(selection = updated) }
+        }
+    }
+
+    fun clearSelection() {
+        selectionJob?.cancel()
+        mutableState.update { it.copy(selection = null, selecting = false) }
+    }
+
+    fun addHighlight(colorArgb: Long, style: PdfAnnotationStyle = PdfAnnotationStyle.HIGHLIGHT) {
+        val state = mutableState.value
+        val selection = state.selection ?: return
+        val info = state.pageInfo[selection.pageIndex] ?: return
+        val normalizedRects = selection.bounds.map { rect ->
+            PdfRect(
+                rect.left / info.width,
+                rect.top / info.height,
+                rect.right / info.width,
+                rect.bottom / info.height,
+            )
+        }
+        val locator = PdfAnnotationCodec.encode(
+            PdfAnnotationLocator(selection.pageIndex, state.pageOffsetFraction, style, normalizedRects),
+        )
+        viewModelScope.launch {
+            readingDao.insertHighlight(
+                HighlightEntity(
+                    bookId = bookId,
+                    locatorJson = locator,
+                    selectedText = selection.text,
+                    colorArgb = colorArgb,
+                ),
+            )
+            mutableState.update {
+                it.copy(
+                    selection = null,
+                    notice = when (style) {
+                        PdfAnnotationStyle.UNDERLINE -> "Subrayado guardado"
+                        PdfAnnotationStyle.QUOTE -> "Cita guardada"
+                        else -> "Resaltado guardado"
+                    },
+                )
+            }
+        }
+    }
+
+    fun addNote(content: String) {
+        val state = mutableState.value
+        val selection = state.selection ?: return
+        val info = state.pageInfo[selection.pageIndex] ?: return
+        val rects = selection.bounds.map { rect ->
+            PdfRect(rect.left / info.width, rect.top / info.height, rect.right / info.width, rect.bottom / info.height)
+        }
+        val locator = PdfAnnotationCodec.encode(
+            PdfAnnotationLocator(selection.pageIndex, state.pageOffsetFraction, PdfAnnotationStyle.NOTE, rects),
+        )
+        viewModelScope.launch {
+            readingDao.insertNote(
+                NoteEntity(bookId = bookId, locatorJson = locator, content = content.trim()),
+            )
+            mutableState.update { it.copy(selection = null, notice = "Nota guardada") }
+        }
+    }
+
+    fun addNoteToHighlight(highlight: HighlightEntity, content: String) {
+        viewModelScope.launch {
+            readingDao.insertNote(
+                NoteEntity(
+                    bookId = bookId,
+                    highlightId = highlight.id,
+                    locatorJson = highlight.locatorJson,
+                    content = content.trim(),
+                ),
+            )
+            mutableState.update { it.copy(notice = "Nota guardada") }
+        }
+    }
+
+    fun updateHighlight(highlight: HighlightEntity, colorArgb: Long, style: PdfAnnotationStyle) {
+        val locator = PdfAnnotationCodec.decode(highlight.locatorJson) ?: return
+        viewModelScope.launch {
+            readingDao.updateHighlight(
+                highlight.id,
+                colorArgb,
+                PdfAnnotationCodec.encode(locator.copy(style = style)),
+            )
+            mutableState.update { it.copy(notice = "Anotación actualizada") }
+        }
+    }
+
+    fun deleteHighlight(highlightId: Long) = viewModelScope.launch {
+        readingDao.deleteHighlight(highlightId)
+        mutableState.update { it.copy(notice = "Anotación eliminada") }
+    }
+
+    fun deleteNote(noteId: Long) = viewModelScope.launch {
+        readingDao.deleteNote(noteId)
+        mutableState.update { it.copy(notice = "Nota eliminada") }
+    }
+    fun persistBrightness() {
+        val value = mutableState.value.brightness
+        viewModelScope.launch { settingsRepository.setPdfReaderBrightness(value) }
+    }
+    fun setBrightnessAndPersist(value: Float) {
+        setBrightness(value)
+        persistBrightness()
     }
     fun toggleControls() = mutableState.update { if (it.focusMode) it else it.copy(controlsVisible = !it.controlsVisible, controlsInteractionToken = it.controlsInteractionToken + 1) }
     fun showControls() = mutableState.update { if (it.focusMode) it else it.copy(controlsVisible = true, controlsInteractionToken = it.controlsInteractionToken + 1) }
@@ -268,11 +458,14 @@ class PdfReaderViewModel(
     fun toggleBookmark() {
         val state = mutableState.value
         val existing = state.bookmarks.firstOrNull {
-            PdfBookmarkCodec.decode(it.locatorJson)?.page == state.currentPage
+            PdfBookmarkCodec.decode(it.locatorJson)?.let { locator ->
+                locator.page == state.currentPage && kotlin.math.abs(locator.offsetFraction - state.pageOffsetFraction) <= .035f
+            } == true
         }
         viewModelScope.launch {
             if (existing != null) {
                 readingDao.deleteBookmark(existing.id)
+                mutableState.update { it.copy(notice = "Marcador eliminado", bookmarkPulseToken = it.bookmarkPulseToken + 1) }
             } else {
                 readingDao.insertBookmark(
                     BookmarkEntity(
@@ -281,6 +474,7 @@ class PdfReaderViewModel(
                         label = "Página ${state.currentPage + 1}",
                     ),
                 )
+                mutableState.update { it.copy(notice = "Marcador añadido", bookmarkPulseToken = it.bookmarkPulseToken + 1) }
             }
         }
     }
@@ -292,6 +486,20 @@ class PdfReaderViewModel(
         val safePage = locator.page.coerceIn(0, (mutableState.value.pageCount - 1).coerceAtLeast(0))
         mutableState.update {
             it.copy(currentPage = safePage, pageOffsetFraction = locator.offsetFraction, navigationToken = it.navigationToken + 1)
+        }
+        scheduleProgressSave()
+    }
+
+    fun goToAnnotation(locatorJson: String) {
+        val locator = PdfAnnotationCodec.decode(locatorJson) ?: return
+        val safePage = locator.page.coerceIn(0, (mutableState.value.pageCount - 1).coerceAtLeast(0))
+        mutableState.update {
+            it.copy(
+                currentPage = safePage,
+                pageOffsetFraction = locator.offsetFraction,
+                navigationToken = it.navigationToken + 1,
+                selection = null,
+            )
         }
         scheduleProgressSave()
     }
@@ -385,6 +593,7 @@ class PdfReaderViewModel(
     }
 
     fun clearNotice() = mutableState.update { it.copy(notice = null) }
+    fun showNotice(message: String) = mutableState.update { it.copy(notice = message) }
 
     private fun initializeTts() {
         if (textToSpeech != null) return
@@ -527,7 +736,8 @@ class PdfReaderViewModel(
                 pageOffsetFraction = state.pageOffsetFraction,
                 fitMode = state.fitMode.name,
                 direction = state.direction.name,
-                cropMargins = state.cropMargins,
+                cropMargins = state.cropMode == PdfCropMode.AUTOMATIC,
+                cropMode = state.cropMode.name,
                 orientation = state.orientation.name,
                 rotation = state.rotation,
                 pdfTheme = state.readerTheme.name,
@@ -546,12 +756,13 @@ class PdfReaderViewModel(
 
     override fun onCleared() {
         cleared = true
-        val activeJobs = (renderJobs.values + thumbnailJobs.values + listOfNotNull(searchJob)).distinct()
+        val activeJobs = (renderJobs.values + thumbnailJobs.values + listOfNotNull(searchJob, selectionJob)).distinct()
         renderJobs.clear()
         thumbnailJobs.clear()
         searchJob = null
+        selectionJob = null
         activeJobs.forEach(Job::cancel)
-        mutableState.update { it.copy(pages = emptyMap(), thumbnails = emptyMap()) }
+        mutableState.update { it.copy(pages = emptyMap(), pageInfo = emptyMap(), thumbnails = emptyMap(), selection = null) }
         textToSpeech?.stop()
         textToSpeech?.shutdown()
         textToSpeech = null
@@ -579,4 +790,23 @@ private fun String?.toPdfDirection(): PdfPageDirection = when (this) {
     "HORIZONTAL", PdfPageDirection.PAGED_HORIZONTAL.name -> PdfPageDirection.PAGED_HORIZONTAL
     PdfPageDirection.SPREAD.name -> PdfPageDirection.SPREAD
     else -> PdfPageDirection.CONTINUOUS
+}
+
+private fun PdfReaderTheme.labelForNotice(): String = when (this) {
+    PdfReaderTheme.DAY -> "Día"
+    PdfReaderTheme.SEPIA -> "Sepia"
+    PdfReaderTheme.NIGHT -> "Noche"
+    PdfReaderTheme.CONSOLE -> "Consola"
+}
+
+private fun PdfCropMode.labelForNotice(): String = when (this) {
+    PdfCropMode.NONE -> "Sin recorte"
+    PdfCropMode.AUTOMATIC -> "Recorte automático"
+    PdfCropMode.MANUAL -> "Recorte manual"
+}
+
+private fun PdfFitMode.labelForNotice(): String = when (this) {
+    PdfFitMode.PAGE -> "Página completa"
+    PdfFitMode.WIDTH -> "Ajustar al ancho"
+    PdfFitMode.CONTENT -> "Ajustar al contenido"
 }

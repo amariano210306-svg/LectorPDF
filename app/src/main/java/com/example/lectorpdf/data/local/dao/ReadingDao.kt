@@ -27,6 +27,12 @@ interface ReadingDao {
     suspend fun getNotes(bookId: Long): List<NoteEntity>
     @Insert suspend fun insertHighlight(highlight: HighlightEntity): Long
     @Insert suspend fun insertNote(note: NoteEntity): Long
+    @Query("UPDATE highlights SET colorArgb = :colorArgb, locatorJson = :locatorJson, updatedAt = :updatedAt WHERE id = :highlightId")
+    suspend fun updateHighlight(highlightId: Long, colorArgb: Long, locatorJson: String, updatedAt: Long = System.currentTimeMillis())
+    @Query("DELETE FROM highlights WHERE id = :highlightId")
+    suspend fun deleteHighlight(highlightId: Long)
+    @Query("DELETE FROM notes WHERE id = :noteId")
+    suspend fun deleteNote(noteId: Long)
     @Insert suspend fun insertSession(session: ReadingSessionEntity): Long
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun upsertGoal(goal: ReadingGoalEntity): Long
 
@@ -35,6 +41,9 @@ interface ReadingDao {
 
     @Query("SELECT * FROM highlights WHERE bookId = :bookId ORDER BY createdAt DESC")
     fun observeHighlights(bookId: Long): Flow<List<HighlightEntity>>
+
+    @Query("SELECT * FROM notes WHERE bookId = :bookId ORDER BY createdAt DESC")
+    fun observeNotes(bookId: Long): Flow<List<NoteEntity>>
 
     @Query("SELECT COALESCE(SUM(durationMillis), 0) FROM reading_sessions WHERE startedAt >= :fromMillis")
     fun observeReadingTimeSince(fromMillis: Long): Flow<Long>

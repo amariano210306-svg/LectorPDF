@@ -71,6 +71,7 @@ data class BookProgressEntity(
     @ColumnInfo(defaultValue = "0") val cropTop: Float = 0f,
     @ColumnInfo(defaultValue = "0") val cropRight: Float = 0f,
     @ColumnInfo(defaultValue = "0") val cropBottom: Float = 0f,
+    @ColumnInfo(defaultValue = "'NONE'") val cropMode: String = "NONE",
 )
 
 @Entity(tableName = "collections", indices = [Index(value = ["name"], unique = true)])

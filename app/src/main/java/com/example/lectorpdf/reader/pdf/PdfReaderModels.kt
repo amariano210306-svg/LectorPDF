@@ -3,6 +3,7 @@ package com.example.lectorpdf.reader.pdf
 import kotlin.math.roundToInt
 
 enum class PdfReaderTheme { DAY, NIGHT, SEPIA, CONSOLE }
+enum class PdfCropMode { NONE, AUTOMATIC, MANUAL }
 
 data class PdfCropInsets(
     val left: Float = 0f,

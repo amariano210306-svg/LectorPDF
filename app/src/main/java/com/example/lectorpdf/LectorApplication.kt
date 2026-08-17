@@ -22,7 +22,11 @@ class AppContainer(private val application: Application) {
         application,
         LectorDatabase::class.java,
         "lector.db",
-    ).addMigrations(LectorDatabase.MIGRATION_1_2, LectorDatabase.MIGRATION_2_3).build()
+    ).addMigrations(
+        LectorDatabase.MIGRATION_1_2,
+        LectorDatabase.MIGRATION_2_3,
+        LectorDatabase.MIGRATION_3_4,
+    ).build()
 
     val settingsRepository = SettingsRepository(application)
     val libraryRepository = LibraryRepository(database.bookDao(), database.collectionDao())

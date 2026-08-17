@@ -33,6 +33,11 @@ data class AppSettings(
     val lastOpenedBookId: Long? = null,
     val pdfTtsRate: Float = 1f,
     val pdfTtsPitch: Float = 1f,
+    val pdfReaderBrightness: Float = -1f,
+    val pdfBrightnessGesture: Boolean = true,
+    val pdfThemeCornerGesture: Boolean = true,
+    val pdfBookmarkCornerGesture: Boolean = true,
+    val pdfShowBookmarkInFocus: Boolean = false,
 )
 
 class SettingsRepository(private val context: Context) {
@@ -51,6 +56,11 @@ class SettingsRepository(private val context: Context) {
         val lastOpenedBookId = longPreferencesKey("last_opened_book_id")
         val pdfTtsRate = floatPreferencesKey("pdf_tts_rate")
         val pdfTtsPitch = floatPreferencesKey("pdf_tts_pitch")
+        val pdfReaderBrightness = floatPreferencesKey("pdf_reader_brightness")
+        val pdfBrightnessGesture = booleanPreferencesKey("pdf_brightness_gesture")
+        val pdfThemeCornerGesture = booleanPreferencesKey("pdf_theme_corner_gesture")
+        val pdfBookmarkCornerGesture = booleanPreferencesKey("pdf_bookmark_corner_gesture")
+        val pdfShowBookmarkInFocus = booleanPreferencesKey("pdf_show_bookmark_in_focus")
     }
 
     val settings: Flow<AppSettings> = context.settingsDataStore.data
@@ -71,6 +81,11 @@ class SettingsRepository(private val context: Context) {
                 lastOpenedBookId = preferences[Keys.lastOpenedBookId],
                 pdfTtsRate = (preferences[Keys.pdfTtsRate] ?: 1f).coerceIn(.5f, 2f),
                 pdfTtsPitch = (preferences[Keys.pdfTtsPitch] ?: 1f).coerceIn(.5f, 1.5f),
+                pdfReaderBrightness = (preferences[Keys.pdfReaderBrightness] ?: -1f).let { if (it < 0f) -1f else it.coerceIn(.05f, 1f) },
+                pdfBrightnessGesture = preferences[Keys.pdfBrightnessGesture] ?: true,
+                pdfThemeCornerGesture = preferences[Keys.pdfThemeCornerGesture] ?: true,
+                pdfBookmarkCornerGesture = preferences[Keys.pdfBookmarkCornerGesture] ?: true,
+                pdfShowBookmarkInFocus = preferences[Keys.pdfShowBookmarkInFocus] ?: false,
             )
         }
 
@@ -92,6 +107,11 @@ class SettingsRepository(private val context: Context) {
     suspend fun setLastOpenedBook(bookId: Long) = set(Keys.lastOpenedBookId, bookId)
     suspend fun setPdfTtsRate(value: Float) = set(Keys.pdfTtsRate, value.coerceIn(.5f, 2f))
     suspend fun setPdfTtsPitch(value: Float) = set(Keys.pdfTtsPitch, value.coerceIn(.5f, 1.5f))
+    suspend fun setPdfReaderBrightness(value: Float) = set(Keys.pdfReaderBrightness, if (value < 0f) -1f else value.coerceIn(.05f, 1f))
+    suspend fun setPdfBrightnessGesture(value: Boolean) = set(Keys.pdfBrightnessGesture, value)
+    suspend fun setPdfThemeCornerGesture(value: Boolean) = set(Keys.pdfThemeCornerGesture, value)
+    suspend fun setPdfBookmarkCornerGesture(value: Boolean) = set(Keys.pdfBookmarkCornerGesture, value)
+    suspend fun setPdfShowBookmarkInFocus(value: Boolean) = set(Keys.pdfShowBookmarkInFocus, value)
     suspend fun clearLastOpenedBook() {
         context.settingsDataStore.edit { it.remove(Keys.lastOpenedBookId) }
     }

@@ -36,7 +36,7 @@ import com.example.lectorpdf.data.local.entity.BookFolderEntity
         LibraryFolderEntity::class,
         BookFolderEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class LectorDatabase : RoomDatabase() {
@@ -86,6 +86,20 @@ abstract class LectorDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE book_progress ADD COLUMN cropTop REAL NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE book_progress ADD COLUMN cropRight REAL NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE book_progress ADD COLUMN cropBottom REAL NOT NULL DEFAULT 0")
+            }
+        }
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE book_progress ADD COLUMN cropMode TEXT NOT NULL DEFAULT 'NONE'")
+                db.execSQL(
+                    """
+                    UPDATE book_progress SET cropMode = CASE
+                        WHEN cropMargins = 1 THEN 'AUTOMATIC'
+                        WHEN cropLeft > 0 OR cropTop > 0 OR cropRight > 0 OR cropBottom > 0 THEN 'MANUAL'
+                        ELSE 'NONE'
+                    END
+                    """.trimIndent(),
+                )
             }
         }
     }

@@ -2,20 +2,28 @@
 
 package com.example.lectorpdf.reader.pdf
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -28,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -43,8 +52,18 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.RotateRight
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.outlined.CenterFocusStrong
 import androidx.compose.material.icons.outlined.FindInPage
+import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FormatQuote
+import androidx.compose.material.icons.outlined.FormatUnderlined
+import androidx.compose.material.icons.outlined.Highlight
+import androidx.compose.material.icons.outlined.MoreHoriz
+import androidx.compose.material.icons.outlined.Search
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Translate
 import androidx.compose.material.icons.outlined.GridView
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Tune
@@ -80,6 +99,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -87,8 +107,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.isSpecified
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -99,11 +122,20 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import com.example.lectorpdf.reader.web.ReaderWebActivity
+import com.example.lectorpdf.reader.web.ReaderWebMode
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val ReaderBackground = Color(0xFF171918)
 
@@ -113,8 +145,16 @@ fun PdfReaderScreen(
     viewModel: PdfReaderViewModel,
     keepScreenOn: Boolean,
     volumeButtonsTurnPages: Boolean,
+    brightnessGestureEnabled: Boolean,
+    themeCornerGestureEnabled: Boolean,
+    bookmarkCornerGestureEnabled: Boolean,
+    showBookmarkInFocus: Boolean,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetVolumeButtons: (Boolean) -> Unit,
+    onSetBrightnessGesture: (Boolean) -> Unit,
+    onSetThemeCornerGesture: (Boolean) -> Unit,
+    onSetBookmarkCornerGesture: (Boolean) -> Unit,
+    onSetShowBookmarkInFocus: (Boolean) -> Unit,
     onBack: () -> Unit,
     onOrientation: (ReaderOrientation) -> Unit,
 ) {
@@ -123,6 +163,11 @@ fun PdfReaderScreen(
     var pageDialogVisible by remember { mutableStateOf(false) }
     var searchVisible by remember { mutableStateOf(false) }
     var bookmarksVisible by remember { mutableStateOf(false) }
+    var annotationsVisible by remember { mutableStateOf(false) }
+    var noteEditorVisible by remember { mutableStateOf(false) }
+    var noteDraft by remember { mutableStateOf("") }
+    var noteTargetHighlight by remember { mutableStateOf<com.example.lectorpdf.data.local.entity.HighlightEntity?>(null) }
+    var editingHighlight by remember { mutableStateOf<com.example.lectorpdf.data.local.entity.HighlightEntity?>(null) }
     var brightnessOverlay by remember { mutableStateOf<Float?>(null) }
     val currentBrightness by rememberUpdatedState(state.brightness)
     val exportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
@@ -137,7 +182,7 @@ fun PdfReaderScreen(
     }
     LaunchedEffect(state.notice) {
         if (state.notice != null) {
-            delay(2_800)
+            delay(1_100)
             viewModel.clearNotice()
         }
     }
@@ -151,11 +196,7 @@ fun PdfReaderScreen(
 
     Box(
         Modifier.fillMaxSize()
-            .background(state.readerTheme.readerBackground())
-            .readerBrightnessGesture(
-                current = { currentBrightness },
-                onChange = { value -> viewModel.setBrightness(value); brightnessOverlay = value },
-            ),
+            .background(state.readerTheme.readerBackground()),
     ) {
         when {
             state.loading -> CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -164,10 +205,56 @@ fun PdfReaderScreen(
                 val centerTap = {
                     if (state.focusMode) viewModel.toggleFocusMode() else viewModel.toggleControls()
                 }
+                val gestureConfig = ReaderGestureConfig(
+                    allowed = !state.controlsVisible && state.selection == null && !state.selecting &&
+                        !settingsVisible && !thumbnailsVisible && !pageDialogVisible &&
+                        !searchVisible && !bookmarksVisible && !annotationsVisible &&
+                        !noteEditorVisible && editingHighlight == null,
+                    brightnessEnabled = brightnessGestureEnabled,
+                    themeEnabled = themeCornerGestureEnabled,
+                    bookmarkEnabled = bookmarkCornerGestureEnabled,
+                    selectionEnabled = !settingsVisible && !thumbnailsVisible && !pageDialogVisible &&
+                        !searchVisible && !bookmarksVisible && !annotationsVisible &&
+                        !noteEditorVisible && editingHighlight == null,
+                    currentBrightness = { currentBrightness },
+                    onBrightness = { value -> viewModel.setBrightness(value); brightnessOverlay = value },
+                    onBrightnessFinished = viewModel::persistBrightness,
+                    onTheme = viewModel::cycleReaderTheme,
+                    onBookmark = viewModel::toggleBookmark,
+                    onNote = { noteTargetHighlight = null; noteDraft = ""; noteEditorVisible = true },
+                    onDocumentSearch = { query -> viewModel.search(query); searchVisible = true },
+                    onEditHighlight = { editingHighlight = it },
+                )
                 when (state.direction) {
-                    PdfPageDirection.CONTINUOUS -> ContinuousPdfReader(state, viewModel, centerTap)
-                    PdfPageDirection.PAGED_HORIZONTAL -> HorizontalPdfReader(state, viewModel, centerTap)
-                    PdfPageDirection.SPREAD -> SpreadPdfReader(state, viewModel, centerTap)
+                    PdfPageDirection.CONTINUOUS -> ContinuousPdfReader(state, viewModel, centerTap, gestureConfig)
+                    PdfPageDirection.PAGED_HORIZONTAL -> HorizontalPdfReader(state, viewModel, centerTap, gestureConfig)
+                    PdfPageDirection.SPREAD -> SpreadPdfReader(state, viewModel, centerTap, gestureConfig)
+                }
+                val bookmarked = state.bookmarks.any { PdfBookmarkCodec.decode(it.locatorJson)?.page == state.currentPage }
+                var bookmarkPulsing by remember { mutableStateOf(false) }
+                LaunchedEffect(state.bookmarkPulseToken) {
+                    if (state.bookmarkPulseToken > 0) {
+                        bookmarkPulsing = true
+                        delay(260)
+                        bookmarkPulsing = false
+                    }
+                }
+                val bookmarkScale by animateFloatAsState(if (bookmarkPulsing) 1.28f else 1f, label = "bookmark-pulse")
+                AnimatedVisibility(
+                    visible = bookmarked && (!state.focusMode || showBookmarkInFocus),
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.align(Alignment.TopEnd)
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End))
+                        .padding(12.dp),
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = .92f),
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.scale(bookmarkScale),
+                    ) {
+                        Icon(Icons.Outlined.Bookmark, "La posición actual tiene marcador", Modifier.padding(9.dp).size(22.dp))
+                    }
                 }
                 AnimatedVisibility(
                     visible = state.controlsVisible && !state.focusMode,
@@ -182,6 +269,7 @@ fun PdfReaderScreen(
                         onSettings = { settingsVisible = true; viewModel.noteControlsInteraction() },
                         onBookmark = viewModel::toggleBookmark,
                         onBookmarks = { bookmarksVisible = true; viewModel.noteControlsInteraction() },
+                        onAnnotations = { annotationsVisible = true; viewModel.noteControlsInteraction() },
                         onExport = { exportLauncher.launch("anotaciones-${state.currentPage + 1}.md") },
                         onRotate = viewModel::rotate,
                         onFocus = viewModel::toggleFocusMode,
@@ -231,8 +319,20 @@ fun PdfReaderScreen(
             viewModel = viewModel,
             keepScreenOn = keepScreenOn,
             volumeButtonsTurnPages = volumeButtonsTurnPages,
+            brightnessGestureEnabled = brightnessGestureEnabled,
+            themeCornerGestureEnabled = themeCornerGestureEnabled,
+            bookmarkCornerGestureEnabled = bookmarkCornerGestureEnabled,
+            showBookmarkInFocus = showBookmarkInFocus,
             onSetKeepScreenOn = onSetKeepScreenOn,
             onSetVolumeButtons = onSetVolumeButtons,
+            onSetBrightnessGesture = onSetBrightnessGesture,
+            onSetThemeCornerGesture = onSetThemeCornerGesture,
+            onSetBookmarkCornerGesture = onSetBookmarkCornerGesture,
+            onSetShowBookmarkInFocus = onSetShowBookmarkInFocus,
+            onOpenSearch = { settingsVisible = false; searchVisible = true },
+            onOpenBookmarks = { settingsVisible = false; bookmarksVisible = true },
+            onOpenAnnotations = { settingsVisible = false; annotationsVisible = true },
+            onOpenThumbnails = { settingsVisible = false; thumbnailsVisible = true },
             onOrientation = onOrientation,
             onDismiss = { settingsVisible = false },
         )
@@ -260,6 +360,52 @@ fun PdfReaderScreen(
             bookmarksVisible = false
         }
     }
+    if (annotationsVisible) {
+        AnnotationSheet(state, viewModel, onDismiss = { annotationsVisible = false }) { locator ->
+            viewModel.goToAnnotation(locator)
+            annotationsVisible = false
+        }
+    }
+    if (noteEditorVisible) {
+        AlertDialog(
+            onDismissRequest = { noteEditorVisible = false },
+            title = { Text("Añadir nota") },
+            text = {
+                OutlinedTextField(
+                    value = noteDraft,
+                    onValueChange = { noteDraft = it },
+                    label = { Text("Nota sobre la selección") },
+                    minLines = 3,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        noteTargetHighlight?.let { viewModel.addNoteToHighlight(it, noteDraft) } ?: viewModel.addNote(noteDraft)
+                        noteEditorVisible = false
+                        noteTargetHighlight = null
+                    },
+                    enabled = noteDraft.isNotBlank(),
+                ) { Text("Guardar") }
+            },
+            dismissButton = { TextButton(onClick = { noteEditorVisible = false }) { Text("Cancelar") } },
+        )
+    }
+    editingHighlight?.let { highlight ->
+        HighlightEditorDialog(
+            highlight = highlight,
+            onDismiss = { editingHighlight = null },
+            onUpdate = { color, style -> viewModel.updateHighlight(highlight, color, style); editingHighlight = null },
+            onNote = {
+                noteTargetHighlight = highlight
+                noteDraft = ""
+                noteEditorVisible = true
+                editingHighlight = null
+            },
+            onDelete = { viewModel.deleteHighlight(highlight.id); editingHighlight = null },
+        )
+    }
 }
 
 @Composable
@@ -267,6 +413,7 @@ private fun ContinuousPdfReader(
     state: PdfReaderUiState,
     viewModel: PdfReaderViewModel,
     onCenterTap: () -> Unit,
+    gestureConfig: ReaderGestureConfig,
 ) {
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = state.currentPage)
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -307,11 +454,11 @@ private fun ContinuousPdfReader(
         contentPadding = PaddingValues(vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier.fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal))
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .onSizeChanged { viewport = it },
     ) {
         items(count = state.pageCount, key = { it }, contentType = { "pdf-page" }) { page ->
-            PdfContinuousPage(page, state, viewModel, viewport, onCenterTap)
+            PdfContinuousPage(page, state, viewModel, viewport, onCenterTap, gestureConfig)
         }
     }
 }
@@ -323,6 +470,7 @@ private fun PdfContinuousPage(
     viewModel: PdfReaderViewModel,
     viewport: IntSize,
     onCenterTap: () -> Unit,
+    gestureConfig: ReaderGestureConfig,
 ) {
     val bitmap = state.pages[page]
     val aspect = bitmap?.takeUnless { it.isRecycled }?.let { it.width.toFloat() / it.height } ?: .707f
@@ -340,6 +488,7 @@ private fun PdfContinuousPage(
             aspect = aspect,
             modifier = Modifier.fillMaxWidth(fitFraction).aspectRatio(aspect),
             onCenterTap = onCenterTap,
+            gestureConfig = gestureConfig,
         )
     }
 }
@@ -349,6 +498,7 @@ private fun HorizontalPdfReader(
     state: PdfReaderUiState,
     viewModel: PdfReaderViewModel,
     onCenterTap: () -> Unit,
+    gestureConfig: ReaderGestureConfig,
 ) {
     val pagerState = rememberPagerState(initialPage = state.currentPage, pageCount = { state.pageCount })
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -365,7 +515,9 @@ private fun HorizontalPdfReader(
         state = pagerState,
         userScrollEnabled = state.zoom <= 1.01f,
         beyondViewportPageCount = 1,
-        modifier = Modifier.fillMaxSize().onSizeChanged { viewport = it },
+        modifier = Modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .onSizeChanged { viewport = it },
     ) { page ->
         val bitmap = state.pages[page]
         val aspect = bitmap?.takeUnless { it.isRecycled }?.let { it.width.toFloat() / it.height } ?: .707f
@@ -378,6 +530,7 @@ private fun HorizontalPdfReader(
                 aspect = aspect,
                 modifier = Modifier.fillMaxSize(),
                 onCenterTap = onCenterTap,
+                gestureConfig = gestureConfig,
                 pageMode = true,
             )
         }
@@ -389,6 +542,7 @@ private fun SpreadPdfReader(
     state: PdfReaderUiState,
     viewModel: PdfReaderViewModel,
     onCenterTap: () -> Unit,
+    gestureConfig: ReaderGestureConfig,
 ) {
     val spreadCount = (state.pageCount + 1) / 2
     val pagerState = rememberPagerState(
@@ -411,7 +565,9 @@ private fun SpreadPdfReader(
         state = pagerState,
         beyondViewportPageCount = 1,
         userScrollEnabled = state.zoom <= 1.01f,
-        modifier = Modifier.fillMaxSize().onSizeChanged { viewport = it },
+        modifier = Modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .onSizeChanged { viewport = it },
     ) { spread ->
         Row(
             Modifier.fillMaxSize().padding(horizontal = 6.dp, vertical = 8.dp),
@@ -430,6 +586,7 @@ private fun SpreadPdfReader(
                         aspect = aspect,
                         modifier = Modifier.weight(1f).fillMaxHeight(),
                         onCenterTap = onCenterTap,
+                        gestureConfig = gestureConfig,
                         pageMode = true,
                     )
                 } else {
@@ -449,6 +606,7 @@ private fun PdfPageSurface(
     aspect: Float,
     modifier: Modifier,
     onCenterTap: () -> Unit,
+    gestureConfig: ReaderGestureConfig,
     pageMode: Boolean = false,
 ) {
     var size by remember(page) { mutableStateOf(IntSize.Zero) }
@@ -463,7 +621,7 @@ private fun PdfPageSurface(
         viewModel.setZoom(nextZoom)
     }
     LaunchedEffect(state.zoom) { if (state.zoom <= 1.01f) offset = Offset.Zero }
-    LaunchedEffect(page, viewport, state.zoom, state.rotation, state.fitMode, state.cropMargins, state.manualCrop) {
+    LaunchedEffect(page, viewport, state.zoom, state.rotation, state.fitMode, state.cropMode, state.manualCrop) {
         if (viewport != IntSize.Zero) {
             delay(110)
             viewModel.requestPage(page, viewport.width.coerceAtLeast(320), viewport.height.coerceAtLeast(320))
@@ -472,12 +630,58 @@ private fun PdfPageSurface(
     val maxX = size.width * (state.zoom - 1f) / 2f
     val maxY = size.height * (state.zoom - 1f) / 2f
     val clamped = Offset(offset.x.coerceIn(-maxX, maxX), offset.y.coerceIn(-maxY, maxY))
+    val pageTransform = state.pageInfo[page]?.takeIf { size != IntSize.Zero }?.let { info ->
+        PdfPageTransform(
+            pageWidth = info.width,
+            pageHeight = info.height,
+            crop = info.crop,
+            rotation = state.rotation,
+            viewportWidth = size.width.toFloat(),
+            viewportHeight = size.height.toFloat(),
+            fitMode = if (pageMode) PdfFitMode.PAGE else PdfFitMode.WIDTH,
+            zoom = state.zoom,
+            pan = PdfPoint(clamped.x, clamped.y),
+        )
+    }
     Box(
         modifier
             .background(Color.White)
             .clipToBounds()
             .onSizeChanged { size = it }
-            .readerTapGestures(state.zoom, size, onCenterTap, viewModel::setZoom)
+            .readerBrightnessGesture(
+                enabled = gestureConfig.allowed && gestureConfig.brightnessEnabled,
+                current = gestureConfig.currentBrightness,
+                onChange = gestureConfig.onBrightness,
+                onFinished = gestureConfig.onBrightnessFinished,
+            )
+            .readerTapGestures(
+                zoom = state.zoom,
+                size = size,
+                quickActionsEnabled = gestureConfig.allowed,
+                themeEnabled = gestureConfig.themeEnabled,
+                bookmarkEnabled = gestureConfig.bookmarkEnabled,
+                onCenterTap = onCenterTap,
+                onZoom = viewModel::setZoom,
+                onTheme = gestureConfig.onTheme,
+                onBookmark = gestureConfig.onBookmark,
+                selectionEnabled = gestureConfig.selectionEnabled,
+                onLongPress = { position ->
+                    pageTransform?.let { viewModel.selectText(page, it.viewportToPdf(PdfPoint(position.x, position.y))) }
+                },
+                selectionActive = state.selection != null,
+                onClearSelection = viewModel::clearSelection,
+                onAnnotationTap = { position ->
+                    val info = state.pageInfo[page]
+                    val hit = if (pageTransform == null || info == null) null else state.highlights.firstOrNull { entity ->
+                        PdfAnnotationCodec.decode(entity.locatorJson)?.takeIf { it.page == page }?.rects?.any { normalized ->
+                            val rect = pageTransform.pdfRectToViewport(normalized.fromNormalized(info.width, info.height))
+                            position.x in (rect.left - 8f)..(rect.right + 8f) && position.y in (rect.top - 8f)..(rect.bottom + 8f)
+                        } == true
+                    }
+                    hit?.let(gestureConfig.onEditHighlight)
+                    hit != null
+                },
+            )
             .transformable(transformState, canPan = { state.zoom > 1.01f }),
         contentAlignment = Alignment.Center,
     ) {
@@ -498,22 +702,425 @@ private fun PdfPageSurface(
                 },
             )
         }
+        if (pageTransform != null) {
+            PdfAnnotationOverlay(
+                page = page,
+                pageInfo = state.pageInfo[page],
+                highlights = state.highlights,
+                notes = state.notes,
+                transform = pageTransform,
+            )
+        }
+        if (state.selecting && state.currentPage == page) {
+            CircularProgressIndicator(Modifier.size(26.dp), strokeWidth = 2.dp)
+        }
+        if (state.selection?.pageIndex == page && pageTransform != null) {
+            PdfSelectionOverlay(
+                selection = state.selection,
+                transform = pageTransform,
+                onStart = { viewModel.updateSelection(start = it) },
+                onStop = { viewModel.updateSelection(stop = it) },
+            )
+            PdfSelectionActionBar(
+                selection = state.selection,
+                transform = pageTransform,
+                viewport = size,
+                viewModel = viewModel,
+                onNote = gestureConfig.onNote,
+                onDocumentSearch = gestureConfig.onDocumentSearch,
+            )
+        }
     }
 }
+
+@Composable
+private fun PdfAnnotationOverlay(
+    page: Int,
+    pageInfo: PdfPageInfo?,
+    highlights: List<com.example.lectorpdf.data.local.entity.HighlightEntity>,
+    notes: List<com.example.lectorpdf.data.local.entity.NoteEntity>,
+    transform: PdfPageTransform,
+) {
+    val info = pageInfo ?: return
+    val pageHighlights = highlights.mapNotNull { entity ->
+        PdfAnnotationCodec.decode(entity.locatorJson)
+            ?.takeIf { it.page == page }
+            ?.let { Triple(entity, it, it.rects.map { rect -> transform.pdfRectToViewport(rect.fromNormalized(info.width, info.height)) }) }
+    }
+    val pageNotes = notes.mapNotNull { entity ->
+        PdfAnnotationCodec.decode(entity.locatorJson)
+            ?.takeIf { it.page == page }
+            ?.let { locator -> locator.rects.firstOrNull()?.let { entity to transform.pdfRectToViewport(it.fromNormalized(info.width, info.height)) } }
+    }
+    Canvas(Modifier.fillMaxSize()) {
+        pageHighlights.forEach { (entity, locator, rects) ->
+            val color = Color(entity.colorArgb.toULong())
+            rects.forEach { rect ->
+                if (locator.style == PdfAnnotationStyle.UNDERLINE) {
+                    drawLine(
+                        color = color,
+                        start = Offset(rect.left, rect.bottom - 1.dp.toPx()),
+                        end = Offset(rect.right, rect.bottom - 1.dp.toPx()),
+                        strokeWidth = 2.5.dp.toPx(),
+                    )
+                } else {
+                    drawRoundRect(
+                        color = color.copy(alpha = if (locator.style == PdfAnnotationStyle.QUOTE) .22f else .34f),
+                        topLeft = Offset(rect.left, rect.top),
+                        size = androidx.compose.ui.geometry.Size(rect.width, rect.height),
+                        cornerRadius = CornerRadius(2.dp.toPx()),
+                    )
+                }
+            }
+        }
+        pageNotes.forEach { (_, rect) ->
+            drawCircle(
+                color = Color(0xFFF2B84B),
+                radius = 5.dp.toPx(),
+                center = Offset((rect.left - 8.dp.toPx()).coerceAtLeast(5.dp.toPx()), rect.top + 5.dp.toPx()),
+            )
+        }
+    }
+}
+
+@Composable
+private fun BoxScope.PdfSelectionActionBar(
+    selection: PdfTextSelection,
+    transform: PdfPageTransform,
+    viewport: IntSize,
+    viewModel: PdfReaderViewModel,
+    onNote: () -> Unit,
+    onDocumentSearch: (String) -> Unit,
+) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    var highlightMenu by remember { mutableStateOf(false) }
+    var moreMenu by remember { mutableStateOf(false) }
+    val selectedBounds = selection.bounds.map(transform::pdfRectToViewport)
+    val top = selectedBounds.minOfOrNull(PdfRect::top) ?: 0f
+    val bottom = selectedBounds.maxOfOrNull(PdfRect::bottom) ?: 0f
+    val barHeight = 58.dp
+    val y = with(density) {
+        if (top > barHeight.toPx() + 12.dp.toPx()) {
+            top - barHeight.toPx() - 8.dp.toPx()
+        } else {
+            bottom + 8.dp.toPx()
+        }.coerceIn(8.dp.toPx(), (viewport.height - barHeight.toPx() - 8.dp.toPx()).coerceAtLeast(8.dp.toPx()))
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surface.copy(alpha = .98f),
+        shape = MaterialTheme.shapes.large,
+        shadowElevation = 8.dp,
+        modifier = Modifier.align(Alignment.TopStart)
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp)
+            .offset { IntOffset(0, y.roundToInt()) },
+    ) {
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            item {
+                SelectionAction("Copiar", Icons.Outlined.ContentCopy) {
+                    copySelectedText(context, selection.text)
+                    viewModel.showNotice("Texto copiado")
+                    viewModel.clearSelection()
+                }
+            }
+            item {
+                Box {
+                    SelectionAction("Resaltar", Icons.Outlined.Highlight) { highlightMenu = true }
+                    DropdownMenu(expanded = highlightMenu, onDismissRequest = { highlightMenu = false }) {
+                        HIGHLIGHT_COLORS.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.name) },
+                                leadingIcon = {
+                                    Surface(color = Color(option.argb.toULong()), shape = CircleShape, modifier = Modifier.size(22.dp)) { }
+                                },
+                                onClick = { highlightMenu = false; viewModel.addHighlight(option.argb) },
+                            )
+                        }
+                    }
+                }
+            }
+            item { SelectionAction("Cita", Icons.Outlined.FormatQuote) { viewModel.addHighlight(HIGHLIGHT_QUOTE, PdfAnnotationStyle.QUOTE) } }
+            item { SelectionAction("Traducir", Icons.Outlined.Translate) { translateSelectedText(context, selection.text) } }
+            item {
+                SelectionAction("Diccionario", Icons.AutoMirrored.Outlined.MenuBook) {
+                    context.startActivity(ReaderWebActivity.intent(context, selection.text, ReaderWebMode.DICTIONARY))
+                }
+            }
+            item {
+                Box {
+                    SelectionAction("Más", Icons.Outlined.MoreHoriz) { moreMenu = true }
+                    DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Compartir") },
+                            leadingIcon = { Icon(Icons.Outlined.Share, null) },
+                            onClick = { moreMenu = false; shareSelectedText(context, selection.text) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Nota") },
+                            leadingIcon = { Icon(Icons.AutoMirrored.Outlined.NoteAdd, null) },
+                            onClick = { moreMenu = false; onNote() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Subrayar") },
+                            leadingIcon = { Icon(Icons.Outlined.FormatUnderlined, null) },
+                            onClick = { moreMenu = false; viewModel.addHighlight(HIGHLIGHT_BLUE, PdfAnnotationStyle.UNDERLINE) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Buscar en documento") },
+                            leadingIcon = { Icon(Icons.Outlined.FindInPage, null) },
+                            onClick = { moreMenu = false; onDocumentSearch(selection.text) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Búsqueda web") },
+                            leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                            onClick = {
+                                moreMenu = false
+                                context.startActivity(ReaderWebActivity.intent(context, selection.text, ReaderWebMode.SEARCH))
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Cancelar selección") },
+                            onClick = { moreMenu = false; viewModel.clearSelection() },
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectionAction(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) {
+    TextButton(onClick = onClick) {
+        Icon(icon, label, Modifier.size(19.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(label)
+    }
+}
+
+private data class HighlightColorOption(val name: String, val argb: Long)
+
+private val HIGHLIGHT_COLORS = listOf(
+    HighlightColorOption("Amarillo", 0xFFFFD54FL),
+    HighlightColorOption("Verde", 0xFF66BB6AL),
+    HighlightColorOption("Azul", 0xFF42A5F5L),
+    HighlightColorOption("Rosa", 0xFFEC6FA4L),
+    HighlightColorOption("Morado", 0xFFAB70D6L),
+)
+private const val HIGHLIGHT_BLUE = 0xFF42A5F5L
+private const val HIGHLIGHT_QUOTE = 0xFFF2B84BL
+
+private fun copySelectedText(context: Context, text: String) {
+    context.getSystemService(ClipboardManager::class.java)
+        ?.setPrimaryClip(ClipData.newPlainText("Texto seleccionado", text))
+}
+
+private fun shareSelectedText(context: Context, text: String) {
+    val send = Intent(Intent.ACTION_SEND).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_TEXT, text)
+    }
+    context.startActivity(Intent.createChooser(send, "Compartir texto"))
+}
+
+private fun translateSelectedText(context: Context, text: String) {
+    val process = Intent(Intent.ACTION_PROCESS_TEXT).apply {
+        type = "text/plain"
+        putExtra(Intent.EXTRA_PROCESS_TEXT, text)
+        putExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, true)
+    }
+    if (context.packageManager.queryIntentActivities(process, 0).isNotEmpty()) {
+        context.startActivity(Intent.createChooser(process, "Traducir texto"))
+    } else {
+        context.startActivity(ReaderWebActivity.intent(context, text, ReaderWebMode.TRANSLATE))
+    }
+}
+
+@Composable
+private fun HighlightEditorDialog(
+    highlight: com.example.lectorpdf.data.local.entity.HighlightEntity,
+    onDismiss: () -> Unit,
+    onUpdate: (Long, PdfAnnotationStyle) -> Unit,
+    onNote: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val current = PdfAnnotationCodec.decode(highlight.locatorJson)
+    var color by remember(highlight.id) { mutableLongStateOf(highlight.colorArgb) }
+    var style by remember(highlight.id) { mutableStateOf(current?.style ?: PdfAnnotationStyle.HIGHLIGHT) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Editar anotación") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(highlight.selectedText, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                Text("Color", style = MaterialTheme.typography.labelLarge)
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(count = HIGHLIGHT_COLORS.size) { index ->
+                        val option = HIGHLIGHT_COLORS[index]
+                        IconButton(onClick = { color = option.argb }) {
+                            Surface(
+                                color = Color(option.argb.toULong()),
+                                shape = CircleShape,
+                                border = if (color == option.argb) androidx.compose.foundation.BorderStroke(3.dp, MaterialTheme.colorScheme.onSurface) else null,
+                                modifier = Modifier.size(34.dp).semantics { contentDescription = option.name },
+                            ) { }
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(style != PdfAnnotationStyle.UNDERLINE, { style = PdfAnnotationStyle.HIGHLIGHT }, { Text("Resaltado") })
+                    FilterChip(style == PdfAnnotationStyle.UNDERLINE, { style = PdfAnnotationStyle.UNDERLINE }, { Text("Subrayado") })
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = onNote) { Text("Añadir nota") }
+                    TextButton(onClick = onDelete) { Text("Eliminar", color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = { onUpdate(color, style) }) { Text("Guardar") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancelar") } },
+    )
+}
+
+@Composable
+private fun BoxScope.PdfSelectionOverlay(
+    selection: PdfTextSelection,
+    transform: PdfPageTransform,
+    onStart: (PdfPoint) -> Unit,
+    onStop: (PdfPoint) -> Unit,
+) {
+    val viewportRects = selection.bounds.map(transform::pdfRectToViewport)
+    Canvas(Modifier.fillMaxSize()) {
+        viewportRects.forEach { rect ->
+            drawRoundRect(
+                color = Color(0xFF5BA9FF).copy(alpha = .34f),
+                topLeft = Offset(rect.left, rect.top),
+                size = androidx.compose.ui.geometry.Size(rect.width, rect.height),
+                cornerRadius = CornerRadius(3.dp.toPx()),
+            )
+        }
+    }
+    viewportRects.firstOrNull()?.let { rect ->
+        SelectionHandle(
+            position = PdfPoint(rect.left, rect.bottom),
+            transform = transform,
+            contentDescription = "Inicio de selección",
+            onMove = onStart,
+            modifier = Modifier.align(Alignment.TopStart),
+        )
+    }
+    viewportRects.lastOrNull()?.let { rect ->
+        SelectionHandle(
+            position = PdfPoint(rect.right, rect.bottom),
+            transform = transform,
+            contentDescription = "Fin de selección",
+            onMove = onStop,
+            modifier = Modifier.align(Alignment.TopStart),
+        )
+    }
+}
+
+@Composable
+private fun SelectionHandle(
+    position: PdfPoint,
+    transform: PdfPageTransform,
+    contentDescription: String,
+    onMove: (PdfPoint) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val handleSize = 28.dp
+    var dragPosition by remember(position) { mutableStateOf(position) }
+    Box(
+        modifier
+            .offset {
+                IntOffset(
+                    (dragPosition.x - handleSize.toPx() / 2f).roundToInt(),
+                    (dragPosition.y - 3.dp.toPx()).roundToInt(),
+                )
+            }
+            .size(handleSize)
+            .background(Color(0xFF2F80ED), CircleShape)
+            .semantics { this.contentDescription = contentDescription }
+            .pointerInput(transform) {
+                detectDragGestures(
+                    onDrag = { change, amount ->
+                        change.consume()
+                        dragPosition = PdfPoint(dragPosition.x + amount.x, dragPosition.y + amount.y)
+                        onMove(transform.viewportToPdf(dragPosition))
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) { }
+}
+
+private data class ReaderGestureConfig(
+    val allowed: Boolean,
+    val brightnessEnabled: Boolean,
+    val themeEnabled: Boolean,
+    val bookmarkEnabled: Boolean,
+    val selectionEnabled: Boolean,
+    val currentBrightness: () -> Float,
+    val onBrightness: (Float) -> Unit,
+    val onBrightnessFinished: () -> Unit,
+    val onTheme: () -> Unit,
+    val onBookmark: () -> Unit,
+    val onNote: () -> Unit,
+    val onDocumentSearch: (String) -> Unit,
+    val onEditHighlight: (com.example.lectorpdf.data.local.entity.HighlightEntity) -> Unit,
+)
 
 private fun Modifier.readerTapGestures(
     zoom: Float,
     size: IntSize,
+    quickActionsEnabled: Boolean,
+    themeEnabled: Boolean,
+    bookmarkEnabled: Boolean,
     onCenterTap: () -> Unit,
     onZoom: (Float) -> Unit,
-): Modifier = pointerInput(zoom, size) {
+    onTheme: () -> Unit,
+    onBookmark: () -> Unit,
+    selectionEnabled: Boolean,
+    onLongPress: (Offset) -> Unit,
+    selectionActive: Boolean,
+    onClearSelection: () -> Unit,
+    onAnnotationTap: (Offset) -> Boolean,
+): Modifier = pointerInput(zoom, size, quickActionsEnabled, themeEnabled, bookmarkEnabled, selectionEnabled, selectionActive) {
     detectTapGestures(
         onTap = { position ->
-            if (position.x in size.width * .22f..size.width * .78f && position.y in size.height * .15f..size.height * .85f) {
-                onCenterTap()
+            val edgeInset = 12.dp.toPx()
+            val cornerSize = 64.dp.toPx().coerceAtMost(size.width * .22f)
+            when (pdfQuickTapAction(
+                x = position.x,
+                y = position.y,
+                width = size.width.toFloat(),
+                height = size.height.toFloat(),
+                edgeInset = edgeInset,
+                cornerSize = cornerSize,
+                quickActionsEnabled = quickActionsEnabled,
+                themeEnabled = themeEnabled,
+                bookmarkEnabled = bookmarkEnabled,
+            )) {
+                PdfQuickTapAction.THEME -> onTheme()
+                PdfQuickTapAction.BOOKMARK -> onBookmark()
+                PdfQuickTapAction.CENTER -> when {
+                    onAnnotationTap(position) -> Unit
+                    selectionActive -> onClearSelection()
+                    else -> onCenterTap()
+                }
+                PdfQuickTapAction.NONE -> when {
+                    onAnnotationTap(position) -> Unit
+                    selectionActive -> onClearSelection()
+                }
             }
         },
         onDoubleTap = { onZoom(if (zoom > 1.05f) 1f else 2f) },
+        onLongPress = { if (selectionEnabled) onLongPress(it) },
     )
 }
 
@@ -525,6 +1132,7 @@ private fun ReaderTopBar(
     onSettings: () -> Unit,
     onBookmark: () -> Unit,
     onBookmarks: () -> Unit,
+    onAnnotations: () -> Unit,
     onExport: () -> Unit,
     onRotate: () -> Unit,
     onFocus: () -> Unit,
@@ -557,6 +1165,11 @@ private fun ReaderTopBar(
                         text = { Text("Ver marcadores (${state.bookmarks.size})") },
                         leadingIcon = { Icon(Icons.Outlined.Bookmark, null) },
                         onClick = { menuExpanded = false; onBookmarks() },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Notas y resaltados (${state.highlights.size + state.notes.size})") },
+                        leadingIcon = { Icon(Icons.Outlined.Highlight, null) },
+                        onClick = { menuExpanded = false; onAnnotations() },
                     )
                     DropdownMenuItem(
                         text = { Text("Exportar notas y marcadores") },
@@ -627,8 +1240,20 @@ private fun ReaderSettingsSheet(
     viewModel: PdfReaderViewModel,
     keepScreenOn: Boolean,
     volumeButtonsTurnPages: Boolean,
+    brightnessGestureEnabled: Boolean,
+    themeCornerGestureEnabled: Boolean,
+    bookmarkCornerGestureEnabled: Boolean,
+    showBookmarkInFocus: Boolean,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetVolumeButtons: (Boolean) -> Unit,
+    onSetBrightnessGesture: (Boolean) -> Unit,
+    onSetThemeCornerGesture: (Boolean) -> Unit,
+    onSetBookmarkCornerGesture: (Boolean) -> Unit,
+    onSetShowBookmarkInFocus: (Boolean) -> Unit,
+    onOpenSearch: () -> Unit,
+    onOpenBookmarks: () -> Unit,
+    onOpenAnnotations: () -> Unit,
+    onOpenThumbnails: () -> Unit,
     onOrientation: (ReaderOrientation) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -638,8 +1263,8 @@ private fun ReaderSettingsSheet(
             contentPadding = PaddingValues(start = 22.dp, end = 22.dp, bottom = 28.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { Text("Opciones de PDF", style = MaterialTheme.typography.titleLarge) }
-            item { Text("Desplazamiento", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Opciones de lectura", style = MaterialTheme.typography.titleLarge) }
+            item { Text("Visualización", style = MaterialTheme.typography.titleMedium) }
             item {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(count = PdfPageDirection.entries.size) { index ->
@@ -656,18 +1281,31 @@ private fun ReaderSettingsSheet(
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     PdfFitMode.entries.forEach { fit ->
-                        FilterChip(state.fitMode == fit, { viewModel.setFitMode(fit) }, { Text(if (fit == PdfFitMode.WIDTH) "Al ancho" else "Página completa") })
+                        FilterChip(state.fitMode == fit, { viewModel.setFitMode(fit) }, { Text(fit.label()) })
                     }
                 }
             }
-            item { SettingToggle("Recortar márgenes", "Estima el contenido visible sin modificar el archivo.", state.cropMargins, viewModel::setCropMargins) }
-            item { Text("Recorte manual", style = MaterialTheme.typography.titleMedium) }
-            item { CropSlider("Izquierdo", state.manualCrop.left) { viewModel.setManualCrop(state.manualCrop.copy(left = it)) } }
-            item { CropSlider("Derecho", state.manualCrop.right) { viewModel.setManualCrop(state.manualCrop.copy(right = it)) } }
-            item { CropSlider("Superior", state.manualCrop.top) { viewModel.setManualCrop(state.manualCrop.copy(top = it)) } }
-            item { CropSlider("Inferior", state.manualCrop.bottom) { viewModel.setManualCrop(state.manualCrop.copy(bottom = it)) } }
-            if (!state.manualCrop.isEmpty) {
-                item { TextButton(onClick = { viewModel.setManualCrop(PdfCropInsets()) }) { Text("Restablecer recorte manual") } }
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(count = PdfCropMode.entries.size) { index ->
+                        val mode = PdfCropMode.entries[index]
+                        FilterChip(
+                            selected = state.cropMode == mode,
+                            onClick = { viewModel.setCropMode(mode) },
+                            label = { Text(mode.label()) },
+                        )
+                    }
+                }
+            }
+            if (state.cropMode == PdfCropMode.MANUAL) {
+                item { Text("Recorte manual", style = MaterialTheme.typography.titleSmall) }
+                item { CropSlider("Izquierdo", state.manualCrop.left) { viewModel.setManualCrop(state.manualCrop.copy(left = it)) } }
+                item { CropSlider("Derecho", state.manualCrop.right) { viewModel.setManualCrop(state.manualCrop.copy(right = it)) } }
+                item { CropSlider("Superior", state.manualCrop.top) { viewModel.setManualCrop(state.manualCrop.copy(top = it)) } }
+                item { CropSlider("Inferior", state.manualCrop.bottom) { viewModel.setManualCrop(state.manualCrop.copy(bottom = it)) } }
+                if (!state.manualCrop.isEmpty) {
+                    item { TextButton(onClick = { viewModel.setManualCrop(PdfCropInsets()) }) { Text("Restablecer recorte manual") } }
+                }
             }
             item {
                 OutlinedButton(onClick = viewModel::rotate, modifier = Modifier.fillMaxWidth()) {
@@ -676,7 +1314,8 @@ private fun ReaderSettingsSheet(
                     Text("Rotar 90°")
                 }
             }
-            item { Text("Orientación", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Pantalla", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Orientación", style = MaterialTheme.typography.titleSmall) }
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     ReaderOrientation.entries.forEach { option ->
@@ -704,10 +1343,39 @@ private fun ReaderSettingsSheet(
             }
             item { SettingToggle("Mantener pantalla activa", "Evita que se apague mientras lees.", keepScreenOn, onSetKeepScreenOn) }
             item { SettingToggle("Botones de volumen", "Avanzan o retroceden una página.", volumeButtonsTurnPages, onSetVolumeButtons) }
-            item { SettingToggle("Brillo del sistema", "Usa el brillo normal del dispositivo.", state.brightness < 0f) { viewModel.setBrightness(if (it) -1f else .5f) } }
-            if (state.brightness >= 0f) item { Slider(state.brightness, viewModel::setBrightness, valueRange = .05f..1f) }
+            item { SettingToggle("Brillo del sistema", "Usa el brillo normal del dispositivo.", state.brightness < 0f) { viewModel.setBrightnessAndPersist(if (it) -1f else .5f) } }
+            if (state.brightness >= 0f) item { Slider(state.brightness, viewModel::setBrightnessAndPersist, valueRange = .05f..1f) }
             item { HorizontalDivider() }
-            item { Text("Text To Speech", style = MaterialTheme.typography.titleMedium) }
+            item { Text("Herramientas", style = MaterialTheme.typography.titleMedium) }
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onOpenSearch, enabled = state.searchSupported, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.FindInPage, "Buscar")
+                        Spacer(Modifier.width(6.dp))
+                        Text("Buscar")
+                    }
+                    OutlinedButton(onClick = onOpenBookmarks, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.Bookmark, "Marcadores")
+                        Spacer(Modifier.width(6.dp))
+                        Text("Marcadores")
+                    }
+                }
+            }
+            item {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = onOpenAnnotations, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.Highlight, "Notas y resaltados")
+                        Spacer(Modifier.width(6.dp))
+                        Text("Anotaciones")
+                    }
+                    OutlinedButton(onClick = onOpenThumbnails, modifier = Modifier.weight(1f)) {
+                        Icon(Icons.Outlined.GridView, "Miniaturas")
+                        Spacer(Modifier.width(6.dp))
+                        Text("Miniaturas")
+                    }
+                }
+            }
+            item { Text("Text To Speech", style = MaterialTheme.typography.titleSmall) }
             if (!state.ttsSupported) {
                 item { Text("La extracción de texto PDF requiere Android 15 o posterior.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
             } else {
@@ -733,6 +1401,12 @@ private fun ReaderSettingsSheet(
                     Text("Activar modo enfoque")
                 }
             }
+            item { HorizontalDivider() }
+            item { Text("Gestos", style = MaterialTheme.typography.titleMedium) }
+            item { SettingToggle("Brillo en borde izquierdo", "Arrastra verticalmente desde la franja segura.", brightnessGestureEnabled, onSetBrightnessGesture) }
+            item { SettingToggle("Tema en esquina izquierda", "Alterna Día, Sepia, Noche y Consola.", themeCornerGestureEnabled, onSetThemeCornerGesture) }
+            item { SettingToggle("Marcador en esquina derecha", "Añade o quita el marcador de la posición.", bookmarkCornerGestureEnabled, onSetBookmarkCornerGesture) }
+            item { SettingToggle("Marcador visible en enfoque", "Muestra el indicador incluso con la interfaz oculta.", showBookmarkInFocus, onSetShowBookmarkInFocus) }
         }
     }
 }
@@ -804,6 +1478,76 @@ private fun BookmarkSheet(
                                 }
                                 IconButton(onClick = { viewModel.deleteBookmark(bookmark.id) }) {
                                     Icon(Icons.Outlined.DeleteOutline, "Eliminar marcador")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnnotationSheet(
+    state: PdfReaderUiState,
+    viewModel: PdfReaderViewModel,
+    onDismiss: () -> Unit,
+    onPage: (String) -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(Modifier.fillMaxHeight(.74f).padding(horizontal = 18.dp)) {
+            Text("Notas y resaltados", style = MaterialTheme.typography.titleLarge)
+            if (state.highlights.isEmpty() && state.notes.isEmpty()) {
+                Text(
+                    "Mantén pulsado texto para crear resaltados, subrayados, citas o notas.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 18.dp),
+                )
+            } else {
+                LazyColumn(
+                    Modifier.fillMaxSize().padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    items(count = state.highlights.size, key = { "highlight-${state.highlights[it].id}" }) { index ->
+                        val highlight = state.highlights[index]
+                        val locator = PdfAnnotationCodec.decode(highlight.locatorJson)
+                        Surface(onClick = { onPage(highlight.locatorJson) }, modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Surface(
+                                    color = Color(highlight.colorArgb.toULong()),
+                                    shape = CircleShape,
+                                    modifier = Modifier.size(14.dp),
+                                ) { }
+                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text(
+                                        when (locator?.style) {
+                                            PdfAnnotationStyle.UNDERLINE -> "Subrayado"
+                                            PdfAnnotationStyle.QUOTE -> "Cita"
+                                            else -> "Resaltado"
+                                        } + " · página ${(locator?.page ?: 0) + 1}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                    )
+                                    Text(highlight.selectedText, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                                }
+                                IconButton(onClick = { viewModel.deleteHighlight(highlight.id) }) {
+                                    Icon(Icons.Outlined.DeleteOutline, "Eliminar anotación")
+                                }
+                            }
+                        }
+                    }
+                    items(count = state.notes.size, key = { "note-${state.notes[it].id}" }) { index ->
+                        val note = state.notes[index]
+                        val locator = PdfAnnotationCodec.decode(note.locatorJson)
+                        Surface(onClick = { onPage(note.locatorJson) }, modifier = Modifier.fillMaxWidth()) {
+                            Row(Modifier.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.AutoMirrored.Outlined.NoteAdd, "Nota")
+                                Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                                    Text("Nota · página ${(locator?.page ?: 0) + 1}", style = MaterialTheme.typography.labelLarge)
+                                    Text(note.content, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                                }
+                                IconButton(onClick = { viewModel.deleteNote(note.id) }) {
+                                    Icon(Icons.Outlined.DeleteOutline, "Eliminar nota")
                                 }
                             }
                         }
@@ -899,24 +1643,45 @@ private fun ReaderError(message: String, onBack: () -> Unit) {
 
 private data class VisibleSnapshot(val start: Int, val end: Int, val pages: List<PdfVisiblePage>)
 
-private fun Modifier.readerBrightnessGesture(current: () -> Float, onChange: (Float) -> Unit): Modifier =
-    pointerInput(Unit) {
+private fun Modifier.readerBrightnessGesture(
+    enabled: Boolean,
+    current: () -> Float,
+    onChange: (Float) -> Unit,
+    onFinished: () -> Unit,
+): Modifier = pointerInput(enabled) {
+    if (!enabled) return@pointerInput
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
-            if (down.position.x > 36.dp.toPx()) return@awaitEachGesture
+            val edgeInset = 12.dp.toPx()
+            val stripEnd = edgeInset + 36.dp.toPx()
+            if (down.position.x !in edgeInset..stripEnd) return@awaitEachGesture
             val initial = current()
             var value = if (initial < 0f) .5f else initial
+            var totalX = 0f
+            var totalY = 0f
+            var active = false
+            var cancelled = false
             while (true) {
                 val event = awaitPointerEvent()
+                if (event.changes.count { it.pressed } > 1) {
+                    cancelled = true
+                    break
+                }
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 if (!change.pressed) break
-                val delta = change.positionChange().y
-                if (delta != 0f) {
-                    value = (value - delta / size.height.coerceAtLeast(1)).coerceIn(.05f, 1f)
+                val delta = change.positionChange()
+                totalX += delta.x
+                totalY += delta.y
+                if (!active && abs(totalY) > viewConfiguration.touchSlop && abs(totalY) > abs(totalX) * 1.25f) {
+                    active = true
+                }
+                if (active && delta.y != 0f) {
+                    value = (value - delta.y / size.height.coerceAtLeast(1)).coerceIn(.05f, 1f)
                     change.consume()
                     onChange(value)
                 }
             }
+            if (active && !cancelled) onFinished()
         }
     }
 
@@ -953,6 +1718,18 @@ private fun PdfPageDirection.label(): String = when (this) {
     PdfPageDirection.CONTINUOUS -> "Continuo"
     PdfPageDirection.PAGED_HORIZONTAL -> "Página horizontal"
     PdfPageDirection.SPREAD -> "Doble página"
+}
+
+private fun PdfFitMode.label(): String = when (this) {
+    PdfFitMode.PAGE -> "Página completa"
+    PdfFitMode.WIDTH -> "Ancho"
+    PdfFitMode.CONTENT -> "Contenido"
+}
+
+private fun PdfCropMode.label(): String = when (this) {
+    PdfCropMode.NONE -> "Sin recorte"
+    PdfCropMode.AUTOMATIC -> "Automático"
+    PdfCropMode.MANUAL -> "Manual"
 }
 
 private fun PdfReaderTheme.label(): String = when (this) {

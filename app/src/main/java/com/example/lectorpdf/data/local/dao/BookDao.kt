@@ -140,7 +140,7 @@ interface BookDao {
         UPDATE book_progress SET currentPage = :page, pageCount = :pageCount,
             progress = :progress, zoom = :zoom, lastOpenedAt = :openedAt,
             status = :status, pageOffsetFraction = :pageOffsetFraction,
-            fitMode = :fitMode, direction = :direction, cropMargins = :cropMargins,
+            fitMode = :fitMode, direction = :direction, cropMargins = :cropMargins, cropMode = :cropMode,
             orientation = :orientation, rotation = :rotation, pdfTheme = :pdfTheme,
             cropLeft = :cropLeft, cropTop = :cropTop, cropRight = :cropRight,
             cropBottom = :cropBottom
@@ -159,6 +159,7 @@ interface BookDao {
         fitMode: String,
         direction: String,
         cropMargins: Boolean,
+        cropMode: String,
         orientation: String,
         rotation: Int,
         pdfTheme: String,

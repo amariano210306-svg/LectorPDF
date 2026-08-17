@@ -22,9 +22,25 @@
 - Exportación Markdown mediante SAF de marcadores, notas y resaltados almacenados.
 - Portadas PDF reales bajo demanda con caché de disco limitada.
 
+## Pulido visual y herramientas avanzadas
+
+- Identidad visible `Folio PDF`, icono original libro/documento + marcador, Adaptive Icon, icono monocromático y splash nativo.
+- Gestos rápidos configurables dentro del contenido seguro: brillo en franja izquierda, ciclo Día → Sepia → Noche → Consola y marcador en esquina derecha.
+- Feedback Compose temporal para brillo, tema, marcador, recorte y ajuste; indicador accesible de marcador actual.
+- Selección textual real en Android 15+ mediante `PdfRenderer.Page.selectContent(SelectionBoundary, SelectionBoundary)`.
+- Transformaciones puras PDF ↔ viewport que contemplan crop normalizado, rotación 0/90/180/270, fit, zoom y pan.
+- Menú contextual propio con copiar, resaltar, cita, traducir, diccionario, compartir, nota, subrayado y búsquedas.
+- Resaltados persistentes en amarillo, verde, azul, rosa y morado; subrayados, citas y notas como overlays vectoriales sin modificar el PDF.
+- Panel `Notas y resaltados`, edición al tocar una anotación y navegación precisa a página + offset.
+- Diccionario, traducción y búsqueda explícita mediante WebView HTTPS restringida; JavaScript y acceso a archivos/contenido desactivados.
+- Recorte `Sin recorte / Automático / Manual` y ajuste `Página completa / Ancho / Contenido` con render acorde a la ampliación.
+- Room 4 con migración no destructiva 3 → 4 para persistir el modo de recorte conservando progreso y márgenes previos.
+
 ## Limitaciones deliberadas de la plataforma
 
 - `PdfRenderer` no expone el outline/árbol estructural global del documento. Los enlaces internos de página no son una tabla de contenidos y no se convierten en capítulos inventados.
 - La extracción, búsqueda y selección nativas requieren Android 15 (API 35) en el motor usado. Un PDF escaneado sin capa de texto no puede buscarse, seleccionarse ni leerse con TTS sin OCR.
-- La selección y los resaltados visuales no se habilitan hasta disponer de un mapeo estable entre coordenadas PDF, recorte, rotación y zoom. No se simula selección sobre el bitmap.
+- En Android 14 o anterior no existe selección textual pública equivalente en `PdfRenderer`; se informa la limitación y no se simula selección sobre el bitmap.
+- Un documento escaneado sin capa textual conserva lectura/render/crop, pero no ofrece selección, búsqueda o TTS; OCR permanece fuera de esta fase.
 - La vista dividida con dos motores simultáneos no se habilita en esta fase: duplicaría el presupuesto de bitmaps y necesita una política específica de memoria y ciclo de vida antes de ser segura.
+- EPUB/Readium Navigator permanece deliberadamente sin implementar durante esta fase.
